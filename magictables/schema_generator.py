@@ -1,6 +1,7 @@
+from typing import Dict, Union, List, TypedDict, Optional
 import os
 import sqlite3
-from typing import Dict, Any, Union, List, TypedDict
+from typing import Dict, Any, Set, Union, List, TypedDict
 
 
 def get_table_schema(
@@ -30,7 +31,8 @@ def update_generated_types(conn: sqlite3.Connection):
     tables = cursor.fetchall()
 
     type_definitions = [
-        "from typing import Any, Dict, List, TypedDict, Optional, ForwardRef\n\n"
+        "from typing import Any, Dict, List, TypedDict, Optional, Union\n"
+        "from datetime import date, datetime\n\n"
     ]
     generated_classes = set()
 
@@ -43,6 +45,12 @@ def update_generated_types(conn: sqlite3.Connection):
                 generated_classes,
             )
             type_definitions.append(type_definition + "\n\n")
+
+    # Sort type definitions to ensure nested classes are defined first
+    sorted_type_definitions = sorted(
+        type_definitions[1:], key=lambda x: len(x.split("\n")), reverse=True
+    )
+    type_definitions = [type_definitions[0]] + sorted_type_definitions
 
     # Get the directory of the script being run
     current_dir = os.getcwd()
@@ -71,7 +79,7 @@ def generate_type_definition(
     schema: Dict[str, Union[str, Dict]],
     generated_classes: Set[str] = set(),
 ) -> str:
-    class_name = f"{table_name.capitalize()}Result"
+    class_name = "".join(word.capitalize() for word in table_name.split("_")) + "Result"
     if class_name in generated_classes:
         return ""
 
@@ -81,7 +89,12 @@ def generate_type_definition(
 
     for column, dtype in schema.items():
         if isinstance(dtype, dict):
-            nested_class_name = f"{table_name.capitalize()}{column.capitalize()}Result"
+            nested_class_name = (
+                "".join(
+                    word.capitalize() for word in f"{table_name}_{column}".split("_")
+                )
+                + "Result"
+            )
             nested_type_definition = generate_type_definition(
                 f"{table_name}_{column}", dtype, generated_classes
             )
@@ -95,12 +108,16 @@ def generate_type_definition(
             elif dtype == "REAL":
                 field_type = "float"
             elif dtype == "BLOB":
-                field_type = "Any"
+                field_type = "bytes"
+            elif dtype == "BOOLEAN":
+                field_type = "bool"
+            elif dtype == "DATE" or dtype == "DATETIME":
+                field_type = "str"  # You might want to use a specific date type here
             else:
-                field_type = "Any"
-            fields.append(f"    {column}: {field_type}")
+                field_type = "Any"  # Fallback for unknown types
+            fields.append(f"    {column}: Optional[{field_type}]")
 
-    class_definition = f"class {class_name}(TypedDict):\n"
+    class_definition = f"class {class_name}(TypedDict, total=False):\n"
     class_definition += "\n".join(fields)
 
     return "\n\n".join(nested_definitions + [class_definition])
@@ -110,6 +127,10 @@ def get_type_hint(func_name: str):
     try:
         import magictables_types.generated_types as generated_types
 
-        return getattr(generated_types, f"{func_name.capitalize()}Result")
+        # Convert func_name to PascalCase
+        class_name = (
+            "".join(word.capitalize() for word in func_name.split("_")) + "Result"
+        )
+        return getattr(generated_types, class_name)
     except (ImportError, AttributeError):
         return None
