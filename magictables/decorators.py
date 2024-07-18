@@ -3,9 +3,12 @@ import json
 import hashlib
 import logging
 import uuid
-from typing import Any, Callable, Dict, List
 from .database import get_connection, create_table, update_table_schema
-from .schema_generator import update_generated_types, get_type_hint
+from typing import Any, Callable, Dict, List, TypeVar, cast
+from .schema_generator import get_type_hint
+from typing import Callable, TypeVar
+
+T = TypeVar("T")
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
@@ -247,7 +250,7 @@ def sanitize_sql_name(name):
     return "".join(c if c.isalnum() or c == "_" else "_" for c in name)
 
 
-def mtable():
+def mtable() -> Callable[[Callable[..., T]], Callable[..., T]]:
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
         def wrapper(*args, **kwargs) -> Any:
@@ -301,11 +304,11 @@ def mtable():
                     update_generated_types(conn)
 
                 # Get the generated type hint
-                type_hint = get_type_hint(func.__name__)
+                ResultType = get_type_hint(func.__name__)
 
                 # Convert results to the generated type if available
-                if type_hint is not None:
-                    result = type_hint(**result)
+                if ResultType is not None:
+                    result = cast(ResultType, result)
 
                 return result
 
@@ -319,7 +322,7 @@ def mgen(
     base_url: str = "https://openrouter.ai/api/v1/chat/completions",
     model: str = "mistralai/mistral-7b-instruct",
     batch_size: int = 10,
-):
+) -> Callable[[Callable[..., List[T]]], Callable[..., List[T]]]:
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
@@ -396,11 +399,11 @@ def mgen(
                 update_generated_types(conn)
 
             # Get the generated type hint
-            type_hint = get_type_hint(func.__name__)
+            ResultType = get_type_hint(func.__name__)
 
             # Convert results to the generated type if available
-            if type_hint is not None:
-                results = [type_hint(**result) for result in results]
+            if ResultType is not None:
+                results = [cast(ResultType, result) for result in results]
 
             return results
 
@@ -414,7 +417,7 @@ def augment(
     base_url: str = "https://openrouter.ai/api/v1/chat/completions",
     model: str = "mistralai/mistral-7b-instruct",
     batch_size: int = 10,
-):
+) -> Callable[[Callable[..., pd.DataFrame]], Callable[..., pd.DataFrame]]:
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
@@ -490,14 +493,14 @@ def augment(
                 update_generated_types(conn)
 
             # Get the generated type hint
-            type_hint = get_type_hint(func.__name__)
+            ResultType = get_type_hint(func.__name__)
 
             # Convert results to the generated type if available
-            if type_hint is not None:
+            if ResultType is not None:
                 df = df.astype(
                     {
-                        col: type_hint.__annotations__[col]
-                        for col in type_hint.__annotations__
+                        col: ResultType.__annotations__[col]
+                        for col in ResultType.__annotations__
                         if col in df.columns
                     }
                 )
