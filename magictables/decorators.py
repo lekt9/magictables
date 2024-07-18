@@ -1,34 +1,14 @@
 import functools
 import json
 import hashlib
-from typing import Any, Callable, Dict, List
-from .database import get_connection, create_table, update_table_schema
-
-import functools
-import json
-import hashlib
-from typing import Any, Callable, Dict, List
-from .database import get_connection, create_table, update_table_schema
 import logging
-
-# Configure logging
-logging.basicConfig(level=logging.DEBUG)
-import functools
-import json
-import hashlib
+import uuid
 from typing import Any, Callable, Dict, List
 from .database import get_connection, create_table, update_table_schema
-import logging
 from .schema_generator import update_generated_types, get_type_hint
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
-
-import functools
-import json
-import hashlib
-from typing import Any, Callable, Dict, List
-from .database import get_connection, create_table, update_table_schema
 
 
 def flatten_dict(d: Dict, parent_key: str = "", sep: str = "_") -> Dict:
