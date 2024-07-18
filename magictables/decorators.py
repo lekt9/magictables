@@ -19,6 +19,7 @@ import hashlib
 from typing import Any, Callable, Dict, List
 from .database import get_connection, create_table, update_table_schema
 import logging
+from .schema_generator import update_generated_types, get_type_hint
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
@@ -340,6 +341,16 @@ def mtable():
                     )
 
                     conn.commit()
+
+                    # Update generated types
+                    update_generated_types(conn)
+
+                # Get the generated type hint
+                type_hint = get_type_hint(func.__name__)
+
+                # Convert results to the generated type if available
+                if type_hint is not None:
+                    result = type_hint(**result)
 
                 return result
 
