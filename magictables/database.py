@@ -16,23 +16,24 @@ def get_connection():
         conn.close()
 
 
-def create_table(cursor: sqlite3.Cursor, table_name: str):
+def create_table(cursor, table_name: str):
     cursor.execute(
         f"""
-        CREATE TABLE IF NOT EXISTS [{table_name}] (
-            id TEXT PRIMARY KEY,
-            related_tables TEXT
-        )
+    CREATE TABLE IF NOT EXISTS [{table_name}] (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        reference_id TEXT
+    )
     """
     )
 
 
 def update_table_schema(cursor, table_name: str, columns: List[str]):
-    existing_columns = get_existing_columns(cursor, table_name)
-    new_columns = set(columns) - set(existing_columns)
-
-    for column in new_columns:
-        cursor.execute(f"ALTER TABLE [{table_name}] ADD COLUMN [{column}] TEXT")
+    existing_columns = set(
+        row[1] for row in cursor.execute(f"PRAGMA table_info([{table_name}])")
+    )
+    for column in columns:
+        if column not in existing_columns and column != "reference_id":
+            cursor.execute(f"ALTER TABLE [{table_name}] ADD COLUMN [{column}]")
 
 
 def get_existing_columns(cursor, table_name: str) -> List[str]:
