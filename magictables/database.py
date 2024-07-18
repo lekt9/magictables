@@ -16,25 +16,31 @@ def get_connection():
         conn.close()
 
 
-def create_table(cursor, table_name: str):
-    cursor.execute(
-        f"""
+def create_table(cursor, table_name: str, parent_table: str = None):
+    query = f"""
     CREATE TABLE IF NOT EXISTS [{table_name}] (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         reference_id TEXT
-    )
     """
-    )
+    if parent_table:
+        query += f",\n        {parent_table}_reference_id TEXT"
+    query += "\n    )"
+    cursor.execute(query)
 
 
 def update_table_schema(cursor, table_name: str, columns: List[tuple]):
     existing_columns = set(
         row[1] for row in cursor.execute(f"PRAGMA table_info([{table_name}])")
     )
-    for column, column_type in columns:
+    for column_info in columns:
+        column = column_info[0]
+        column_type = column_info[1]
         if column not in existing_columns and column != "reference_id":
+            additional_constraints = (
+                " ".join(column_info[2:]) if len(column_info) > 2 else ""
+            )
             cursor.execute(
-                f"ALTER TABLE [{table_name}] ADD COLUMN [{column}] {column_type}"
+                f"ALTER TABLE [{table_name}] ADD COLUMN [{column}] {column_type} {additional_constraints}"
             )
 
 

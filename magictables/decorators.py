@@ -24,112 +24,87 @@ def flatten_dict(d: Dict, parent_key: str = "", sep: str = "_") -> Dict:
     return dict(items)
 
 
+def get_sqlite_type(value):
+    if isinstance(value, int):
+        return "INTEGER"
+    elif isinstance(value, float):
+        return "REAL"
+    elif isinstance(value, bool):
+        return "INTEGER"  # SQLite doesn't have a boolean type, so we use INTEGER
+    elif isinstance(value, str):
+        return "TEXT"
+    elif value is None:
+        return "NULL"
+    elif isinstance(value, (list, dict)):
+        return "TEXT"  # We'll store complex types as JSON strings
+    else:
+        return "TEXT"  # Default to TEXT for unknown types
+
+
 def create_tables_for_nested_data(
-    cursor, base_table_name: str, data: Dict, parent_table: str = None
+    cursor, table_name: str, data: dict, parent_table: str = None
 ):
-    tables = {}
-    columns = ["id", "reference_id"]
-    if parent_table:
-        columns.extend([f"{parent_table}_reference_id", "local_id"])
+    columns = []
+    nested_tables = []
 
     for key, value in data.items():
-        if isinstance(value, dict) or (
-            isinstance(value, list) and value and isinstance(value[0], dict)
-        ):
-            nested_table_name = sanitize_sql_name(f"{base_table_name}_{key}")
-            create_table(cursor, nested_table_name)
-            nested_columns = ["id", f"{base_table_name}_reference_id", "local_id"]
-            if isinstance(value, dict):
-                nested_data = value
-            else:  # list of dicts
-                nested_data = value[0]
-            nested_columns.extend(
-                [
-                    sanitize_sql_name(col)
-                    for col in nested_data.keys()
-                    if not isinstance(nested_data[col], (dict, list))
-                ]
-            )
-            update_table_schema(cursor, nested_table_name, nested_columns)
-            tables[key] = {
-                "table_name": nested_table_name,
-                "is_list": isinstance(value, list),
-                "nested_tables": create_tables_for_nested_data(
-                    cursor, nested_table_name, nested_data, base_table_name
-                ),
-            }
-        else:
-            columns.append(sanitize_sql_name(key))
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            columns.append((key, get_sqlite_type(value)))
+        elif isinstance(value, list) and value and isinstance(value[0], dict):
+            nested_tables.append((key, value[0]))
 
-    update_table_schema(cursor, base_table_name, columns)
-    return tables
+    create_table(cursor, table_name, parent_table)
+    update_table_schema(cursor, table_name, columns)
+
+    for nested_key, nested_data in nested_tables:
+        nested_table_name = f"{table_name}_{nested_key}"
+        create_tables_for_nested_data(
+            cursor, nested_table_name, nested_data, table_name
+        )
+
+    return columns, nested_tables
 
 
 def insert_nested_data(
     cursor,
     table_name: str,
-    data: Dict,
-    reference_id: str,
-    table_structure: Dict,
+    data: dict,
     parent_reference_id: str = None,
+    table_structure: tuple = None,
 ):
-    # Get existing columns
+    columns, nested_tables = table_structure if table_structure else ([], [])
+
     cursor.execute(f"PRAGMA table_info([{table_name}])")
-    existing_columns = set(row[1] for row in cursor.fetchall())
+    existing_columns = [row[1] for row in cursor.fetchall() if row[1] != "id"]
+    values = []
+    placeholders = []
 
-    # Prepare columns and values for insertion
-    columns = ["reference_id"]
-    values = [reference_id]
-    if parent_reference_id:
-        columns.extend([f"{table_name.rsplit('_', 1)[0]}_reference_id", "local_id"])
-        values.extend([parent_reference_id, str(uuid.uuid4())])
+    for col in existing_columns:
+        if col == "id":
+            continue
+        if col.endswith("_reference_id") and col != "reference_id":
+            values.append(parent_reference_id)
+        elif col in data:
+            values.append(data[col])
+        else:
+            values.append(None)
+        placeholders.append("?")
+    print("Values:", values)
+    # Use square brackets around column names
+    column_names = ", ".join(f"[{col}]" for col in existing_columns if col != "id")
+    query = f"INSERT INTO [{table_name}] ({column_names}) VALUES ({', '.join(placeholders)})"
+    print("Query:", query)
 
-    for key, value in data.items():
-        if key not in table_structure:
-            sanitized_key = sanitize_sql_name(key)
-            if sanitized_key not in existing_columns:
-                # Add new column if it doesn't exist
-                cursor.execute(
-                    f"ALTER TABLE [{table_name}] ADD COLUMN [{sanitized_key}]"
-                )
-                existing_columns.add(sanitized_key)
-            columns.append(sanitized_key)
-            values.append(value)
+    cursor.execute(query, values)
+    reference_id = str(cursor.lastrowid)
 
-    # Insert non-nested data
-    if columns:
-        placeholders = ", ".join(["?" for _ in columns])
-        column_names = ", ".join(f"[{col}]" for col in columns)
-        cursor.execute(
-            f"INSERT INTO [{table_name}] ({column_names}) VALUES ({placeholders})",
-            values,
-        )
+    for nested_key, _ in nested_tables:
+        if nested_key in data:
+            nested_table_name = f"{table_name}_{nested_key}"
+            for item in data[nested_key]:
+                insert_nested_data(cursor, nested_table_name, item, reference_id)
 
-    # Insert nested data
-    for key, value in data.items():
-        if key in table_structure:
-            nested_table_info = table_structure[key]
-            nested_table_name = nested_table_info["table_name"]
-
-            if nested_table_info["is_list"]:
-                for item in value:
-                    insert_nested_data(
-                        cursor,
-                        nested_table_name,
-                        item,
-                        str(uuid.uuid4()),
-                        nested_table_info["nested_tables"],
-                        reference_id,
-                    )
-            else:
-                insert_nested_data(
-                    cursor,
-                    nested_table_name,
-                    value,
-                    str(uuid.uuid4()),
-                    nested_table_info["nested_tables"],
-                    reference_id,
-                )
+    return reference_id
 
 
 def insert_item(
