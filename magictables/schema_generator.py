@@ -24,18 +24,69 @@ def get_table_schema(
     return schema
 
 
+def update_generated_types(conn: sqlite3.Connection):
+    cursor = conn.cursor()
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    tables = cursor.fetchall()
+
+    type_definitions = [
+        "from typing import Any, Dict, List, TypedDict, Optional, ForwardRef\n\n"
+    ]
+    generated_classes = set()
+
+    for (table_name,) in tables:
+        if table_name.startswith("magic_") or table_name.startswith("ai_"):
+            schema = get_table_schema(cursor, table_name)
+            type_definition = generate_type_definition(
+                table_name.replace("magic_", "").replace("ai_", ""),
+                schema,
+                generated_classes,
+            )
+            type_definitions.append(type_definition + "\n\n")
+
+    # Get the directory of the script being run
+    current_dir = os.getcwd()
+
+    # Create the magictables_types directory if it doesn't exist
+    types_dir = os.path.join(current_dir, "magictables_types")
+    os.makedirs(types_dir, exist_ok=True)
+
+    # Write the generated types to a file in the magictables_types directory
+    with open(os.path.join(types_dir, "generated_types.py"), "w") as f:
+        f.write("\n".join(type_definitions))
+
+    # Update the references
+    with open(os.path.join(types_dir, "generated_types.py"), "r") as f:
+        content = f.read()
+
+    content = content.replace("List['", "List[")
+    content = content.replace("']", "]")
+
+    with open(os.path.join(types_dir, "generated_types.py"), "w") as f:
+        f.write(content)
+
+
 def generate_type_definition(
-    table_name: str, schema: Dict[str, Union[str, Dict]]
+    table_name: str,
+    schema: Dict[str, Union[str, Dict]],
+    generated_classes: Set[str] = set(),
 ) -> str:
     class_name = f"{table_name.capitalize()}Result"
+    if class_name in generated_classes:
+        return ""
+
+    generated_classes.add(class_name)
     fields = []
+    nested_definitions = []
+
     for column, dtype in schema.items():
         if isinstance(dtype, dict):
             nested_class_name = f"{table_name.capitalize()}{column.capitalize()}Result"
             nested_type_definition = generate_type_definition(
-                f"{table_name}_{column}", dtype
+                f"{table_name}_{column}", dtype, generated_classes
             )
-            fields.append(f"    {column}: List[{nested_class_name}]")
+            nested_definitions.append(nested_type_definition)
+            fields.append(f"    {column}: List['{nested_class_name}']")
         else:
             if dtype == "TEXT":
                 field_type = "str"
@@ -52,34 +103,7 @@ def generate_type_definition(
     class_definition = f"class {class_name}(TypedDict):\n"
     class_definition += "\n".join(fields)
 
-    return class_definition
-
-
-def update_generated_types(conn: sqlite3.Connection):
-    cursor = conn.cursor()
-    cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-    tables = cursor.fetchall()
-
-    type_definitions = ["from typing import Any, Dict, List, TypedDict, Optional\n\n"]
-
-    for (table_name,) in tables:
-        if table_name.startswith("magic_") or table_name.startswith("ai_"):
-            schema = get_table_schema(cursor, table_name)
-            type_definition = generate_type_definition(
-                table_name.replace("magic_", "").replace("ai_", ""), schema
-            )
-            type_definitions.append(type_definition + "\n\n")
-
-    # Get the directory of the script being run
-    current_dir = os.getcwd()
-
-    # Create the magictables_types directory if it doesn't exist
-    types_dir = os.path.join(current_dir, "magictables_types")
-    os.makedirs(types_dir, exist_ok=True)
-
-    # Write the generated types to a file in the magictables_types directory
-    with open(os.path.join(types_dir, "generated_types.py"), "w") as f:
-        f.write("\n".join(type_definitions))
+    return "\n\n".join(nested_definitions + [class_definition])
 
 
 def get_type_hint(func_name: str):
