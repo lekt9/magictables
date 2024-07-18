@@ -13,6 +13,21 @@ import logging
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
+import functools
+import json
+import hashlib
+from typing import Any, Callable, Dict, List
+from .database import get_connection, create_table, update_table_schema
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.DEBUG)
+
+import functools
+import json
+import hashlib
+from typing import Any, Callable, Dict, List
+from .database import get_connection, create_table, update_table_schema
 
 
 def flatten_dict(d: Dict, parent_key: str = "", sep: str = "_") -> Dict:
@@ -34,10 +49,12 @@ def create_tables_for_nested_data(
     tables = {}
     for key, value in data.items():
         if isinstance(value, dict):
-            table_name = f"{base_table_name}_{key}"
+            table_name = sanitize_sql_name(f"{base_table_name}_{key}")
             create_table(cursor, table_name)
-            columns = list(value.keys())
-            columns.append(f"{base_table_name}_id")  # Always add parent table ID
+            columns = [sanitize_sql_name(col) for col in value.keys()]
+            columns.append(
+                f"{sanitize_sql_name(base_table_name)}_id"
+            )  # Always add parent table ID
             update_table_schema(cursor, table_name, columns)
             tables[key] = {
                 "table_name": table_name,
@@ -46,10 +63,12 @@ def create_tables_for_nested_data(
                 ),
             }
         elif isinstance(value, list) and value and isinstance(value[0], dict):
-            table_name = f"{base_table_name}_{key}"
+            table_name = sanitize_sql_name(f"{base_table_name}_{key}")
             create_table(cursor, table_name)
-            columns = list(value[0].keys())
-            columns.append(f"{base_table_name}_id")  # Always add parent table ID
+            columns = [sanitize_sql_name(col) for col in value[0].keys()]
+            columns.append(
+                f"{sanitize_sql_name(base_table_name)}_id"
+            )  # Always add parent table ID
             update_table_schema(cursor, table_name, columns)
             tables[key] = {
                 "table_name": table_name,
@@ -65,12 +84,9 @@ def insert_nested_data(
     cursor,
     table_name: str,
     data: Dict,
-    parent_id: str = None,
-    table_structure: Dict = None,
+    parent_id: str,
+    table_structure: Dict,
 ):
-    if not table_structure:
-        return
-
     for key, value in data.items():
         if key in table_structure:
             nested_table_info = table_structure[key]
@@ -78,19 +94,7 @@ def insert_nested_data(
 
             if "is_list" in nested_table_info and nested_table_info["is_list"]:
                 for item in value:
-                    columns = list(item.keys())
-                    columns.append(f"{table_name}_id")  # Always add parent table ID
-                    placeholders = ", ".join(["?" for _ in columns])
-                    values = [
-                        convert_to_supported_type(item[col]) for col in item.keys()
-                    ]
-                    values.append(parent_id)
-
-                    cursor.execute(
-                        f"INSERT INTO [{nested_table_name}] ({', '.join(columns)}) VALUES ({placeholders})",
-                        values,
-                    )
-
+                    insert_item(cursor, nested_table_name, item, table_name, parent_id)
                     nested_id = cursor.lastrowid
                     insert_nested_data(
                         cursor,
@@ -100,17 +104,7 @@ def insert_nested_data(
                         nested_table_info["nested_tables"],
                     )
             else:
-                columns = list(value.keys())
-                columns.append(f"{table_name}_id")  # Always add parent table ID
-                placeholders = ", ".join(["?" for _ in columns])
-                values = [convert_to_supported_type(value[col]) for col in value.keys()]
-                values.append(parent_id)
-
-                cursor.execute(
-                    f"INSERT INTO [{nested_table_name}] ({', '.join(columns)}) VALUES ({placeholders})",
-                    values,
-                )
-
+                insert_item(cursor, nested_table_name, value, table_name, parent_id)
                 nested_id = cursor.lastrowid
                 insert_nested_data(
                     cursor,
@@ -119,6 +113,38 @@ def insert_nested_data(
                     nested_id,
                     nested_table_info["nested_tables"],
                 )
+
+
+def insert_item(
+    cursor, table_name: str, item: Dict, parent_table_name: str, parent_id: str
+):
+    # Get existing columns
+    cursor.execute(f"PRAGMA table_info([{table_name}])")
+    existing_columns = set(row[1] for row in cursor.fetchall())
+
+    # Determine new columns
+    item_columns = set(sanitize_sql_name(col) for col in item.keys())
+    new_columns = item_columns - existing_columns
+
+    # Add new columns
+    for col in new_columns:
+        cursor.execute(f"ALTER TABLE [{table_name}] ADD COLUMN [{col}]")
+
+    # Prepare column names and values
+    columns = list(item_columns) + [f"{sanitize_sql_name(parent_table_name)}_id"]
+    placeholders = ", ".join(["?" for _ in columns])
+    values = [
+        convert_to_supported_type(item.get(col, None)) for col in item_columns
+    ] + [parent_id]
+
+    # Enclose column names in square brackets
+    column_names = ", ".join(f"[{col}]" for col in columns)
+
+    # Insert the data
+    cursor.execute(
+        f"INSERT INTO [{table_name}] ({column_names}) VALUES ({placeholders})",
+        values,
+    )
 
 
 def convert_to_supported_type(value):
@@ -132,34 +158,11 @@ def convert_to_supported_type(value):
         return str(value)
 
 
-def reconstruct_nested_data(
-    cursor, base_table_name: str, call_id: str, related_tables: Dict
-) -> Dict:
-    result = {}
-    for key, table_info in related_tables.items():
-        table_name = table_info["table_name"]
-        cursor.execute(
-            f"SELECT * FROM [{table_name}] WHERE {base_table_name}_id = ?", (call_id,)
-        )
-        rows = cursor.fetchall()
-        if table_info.get("is_list", False):
-            result[key] = [
-                dict(zip([c[0] for c in cursor.description], row)) for row in rows
-            ]
-            for item in result[key]:
-                reconstruct_nested_data(
-                    cursor, table_name, item["id"], table_info.get("nested_tables", {})
-                )
-        else:
-            if rows:
-                result[key] = dict(zip([c[0] for c in cursor.description], rows[0]))
-                reconstruct_nested_data(
-                    cursor,
-                    table_name,
-                    result[key]["id"],
-                    table_info.get("nested_tables", {}),
-                )
-    return result
+def sanitize_sql_name(name):
+    # Ensure the name starts with a letter or underscore
+    if name and not name[0].isalpha() and name[0] != "_":
+        name = "_" + name
+    return "".join(c if c.isalnum() or c == "_" else "_" for c in name)
 
 
 def mtable():
@@ -170,7 +173,7 @@ def mtable():
                 json.dumps((func.__name__, args, kwargs), sort_keys=True).encode()
             ).hexdigest()
 
-            base_table_name = f"magic_{func.__name__}"
+            base_table_name = sanitize_sql_name(f"magic_{func.__name__}")
 
             with get_connection() as (conn, cursor):
                 # Ensure the main table exists
@@ -183,18 +186,7 @@ def mtable():
 
                 if row:
                     # Result found in cache
-                    result = {}
-                    for idx, col in enumerate(cursor.description):
-                        col_name = col[0]
-                        if col_name != "id" and col_name != "related_tables":
-                            result[col_name] = row[idx]
-
-                    # Fetch related data from other tables
-                    related_tables = json.loads(row[-1])
-                    nested_data = reconstruct_nested_data(
-                        cursor, base_table_name, call_id, related_tables
-                    )
-                    result.update(nested_data)
+                    result = reconstruct_nested_data(cursor, base_table_name, call_id)
                 else:
                     # Call the function
                     result = func(*args, **kwargs)
@@ -206,23 +198,30 @@ def mtable():
 
                     # Create tables for nested data
                     table_structure = create_tables_for_nested_data(
-                        cursor, base_table_name, result
+                        cursor,
+                        base_table_name,
+                        result if isinstance(result, dict) else {"result": result},
                     )
 
                     # Flatten the main result for the base table
-                    flattened_result = flatten_dict(result)
+                    flattened_result = flatten_dict(
+                        result if isinstance(result, dict) else {"result": result}
+                    )
+
+                    # Sanitize column names
+                    sanitized_columns = [
+                        sanitize_sql_name(col) for col in flattened_result.keys()
+                    ]
 
                     # Update main table schema
                     update_table_schema(
                         cursor,
                         base_table_name,
-                        list(flattened_result.keys()) + ["related_tables"],
+                        sanitized_columns + ["table_structure"],
                     )
 
                     # Insert data into main table
-                    columns = (
-                        ["id"] + list(flattened_result.keys()) + ["related_tables"]
-                    )
+                    columns = ["id"] + sanitized_columns + ["table_structure"]
                     placeholders = ", ".join(["?" for _ in columns])
                     values = (
                         [call_id]
@@ -240,7 +239,11 @@ def mtable():
 
                     # Insert nested data
                     insert_nested_data(
-                        cursor, base_table_name, result, call_id, table_structure
+                        cursor,
+                        base_table_name,
+                        result if isinstance(result, dict) else {"result": result},
+                        call_id,
+                        table_structure,
                     )
 
                     conn.commit()
@@ -252,35 +255,63 @@ def mtable():
     return decorator
 
 
-def reconstruct_nested_data(
-    cursor, base_table_name: str, call_id: str, related_tables: Dict
-) -> Dict:
+def reconstruct_nested_data(cursor, base_table_name: str, call_id: str) -> Dict:
     result = {}
-    for key, table_info in related_tables.items():
-        table_name = table_info["table_name"]
+
+    # Fetch the main table data
+    cursor.execute(f"SELECT * FROM [{base_table_name}] WHERE id = ?", (call_id,))
+    row = cursor.fetchone()
+    if not row:
+        return result
+
+    # Reconstruct the main table data
+    table_structure = None
+    for idx, col in enumerate(cursor.description):
+        col_name = col[0]
+        if col_name == "table_structure":
+            table_structure = json.loads(row[idx])
+        elif col_name != "id":
+            result[col_name] = row[idx]
+
+    if not table_structure:
+        return result
+
+    # Reconstruct nested data
+    for key, table_info in table_structure.items():
+        nested_table_name = table_info["table_name"]
+        is_list = table_info.get("is_list", False)
+
         cursor.execute(
-            f"SELECT * FROM [{table_name}] WHERE {base_table_name}_id = ?", (call_id,)
+            f"SELECT * FROM [{nested_table_name}] WHERE {base_table_name}_id = ?",
+            (call_id,),
         )
-        rows = cursor.fetchall()
-        if table_info.get("is_list", False):
+        nested_rows = cursor.fetchall()
+
+        if is_list:
             result[key] = []
-            for row in rows:
-                item = dict(zip([c[0] for c in cursor.description], row))
+            for nested_row in nested_rows:
+                nested_item = {}
+                for idx, col in enumerate(cursor.description):
+                    col_name = col[0]
+                    if col_name != f"{base_table_name}_id":
+                        nested_item[col_name] = nested_row[idx]
+                result[key].append(nested_item)
+        elif nested_rows:
+            result[key] = {}
+            for idx, col in enumerate(cursor.description):
+                col_name = col[0]
+                if col_name != f"{base_table_name}_id":
+                    result[key][col_name] = nested_rows[0][idx]
+
+        # Recursively reconstruct deeper nested data
+        if table_info["nested_tables"]:
+            for nested_row in result[key] if is_list else [result[key]]:
+                nested_id = nested_row["id"]
                 nested_data = reconstruct_nested_data(
-                    cursor, table_name, item["id"], table_info.get("nested_tables", {})
+                    cursor, nested_table_name, nested_id
                 )
-                item.update(nested_data)
-                result[key].append(item)
-        else:
-            if rows:
-                result[key] = dict(zip([c[0] for c in cursor.description], rows[0]))
-                nested_data = reconstruct_nested_data(
-                    cursor,
-                    table_name,
-                    result[key]["id"],
-                    table_info.get("nested_tables", {}),
-                )
-                result[key].update(nested_data)
+                nested_row.update(nested_data)
+
     return result
 
 
