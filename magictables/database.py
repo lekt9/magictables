@@ -27,13 +27,15 @@ def create_table(cursor, table_name: str):
     )
 
 
-def update_table_schema(cursor, table_name: str, columns: List[str]):
+def update_table_schema(cursor, table_name: str, columns: List[tuple]):
     existing_columns = set(
         row[1] for row in cursor.execute(f"PRAGMA table_info([{table_name}])")
     )
-    for column in columns:
+    for column, column_type in columns:
         if column not in existing_columns and column != "reference_id":
-            cursor.execute(f"ALTER TABLE [{table_name}] ADD COLUMN [{column}]")
+            cursor.execute(
+                f"ALTER TABLE [{table_name}] ADD COLUMN [{column}] {column_type}"
+            )
 
 
 def get_existing_columns(cursor, table_name: str) -> List[str]:

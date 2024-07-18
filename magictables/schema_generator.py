@@ -1,18 +1,21 @@
-from typing import Dict, Union, List, TypedDict, Optional
+from typing import Dict, Union, List, Set, Optional, Tuple, Any
+from datetime import datetime
 import os
 import sqlite3
-from typing import Dict, Any, Set, Union, List, TypedDict
 
 
 def get_table_schema(
     cursor: sqlite3.Cursor, table_name: str
-) -> Dict[str, Union[str, Dict]]:
+) -> Dict[str, Union[str, Dict, Tuple[str, bool]]]:
     cursor.execute(f"PRAGMA table_info({table_name})")
     columns = cursor.fetchall()
+    print(f"Table info for {table_name}:", columns)  # Debug print
     schema = {
-        col[1]: col[2] for col in columns if col[1] != "id" and col[1] != "timestamp"
+        col[1]: (col[2], col[3] == 0)
+        for col in columns
+        if col[1] != "id" and col[1] != "timestamp"
     }
-
+    # ...
     # Check for nested tables
     cursor.execute(
         f"SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '{table_name}_%'"
@@ -76,7 +79,7 @@ def update_generated_types(conn: sqlite3.Connection):
 
 def generate_type_definition(
     table_name: str,
-    schema: Dict[str, Union[str, Dict]],
+    schema: Dict[str, Union[str, Dict, Tuple[str, bool]]],
     generated_classes: Set[str] = set(),
 ) -> str:
     class_name = "".join(word.capitalize() for word in table_name.split("_")) + "Result"
@@ -87,8 +90,9 @@ def generate_type_definition(
     fields = []
     nested_definitions = []
 
-    for column, dtype in schema.items():
-        if isinstance(dtype, dict):
+    for column, dtype_info in schema.items():
+        print("info", dtype_info)
+        if isinstance(dtype_info, dict):
             nested_class_name = (
                 "".join(
                     word.capitalize() for word in f"{table_name}_{column}".split("_")
@@ -96,11 +100,12 @@ def generate_type_definition(
                 + "Result"
             )
             nested_type_definition = generate_type_definition(
-                f"{table_name}_{column}", dtype, generated_classes
+                f"{table_name}_{column}", dtype_info, generated_classes
             )
             nested_definitions.append(nested_type_definition)
-            fields.append(f"    {column}: List['{nested_class_name}']")
+            fields.append(f"    {column}: List[{nested_class_name}]")
         else:
+            dtype, is_nullable = dtype_info
             if dtype == "TEXT":
                 field_type = "str"
             elif dtype == "INTEGER":
@@ -112,10 +117,15 @@ def generate_type_definition(
             elif dtype == "BOOLEAN":
                 field_type = "bool"
             elif dtype == "DATE" or dtype == "DATETIME":
-                field_type = "str"  # You might want to use a specific date type here
+                field_type = "datetime"
             else:
+                print("type", dtype, is_nullable)
                 field_type = "Any"  # Fallback for unknown types
-            fields.append(f"    {column}: Optional[{field_type}]")
+
+            if is_nullable:
+                fields.append(f"    {column}: Optional[{field_type}]")
+            else:
+                fields.append(f"    {column}: {field_type}")
 
     class_definition = f"class {class_name}(TypedDict, total=False):\n"
     class_definition += "\n".join(fields)
