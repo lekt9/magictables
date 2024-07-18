@@ -1,6 +1,8 @@
 from typing import Dict, Union, List, Set, Optional, Tuple, Any
 from datetime import datetime
 import os
+
+import importlib.util
 import sqlite3
 
 
@@ -133,14 +135,18 @@ def generate_type_definition(
     return "\n\n".join(nested_definitions + [class_definition])
 
 
-def get_type_hint(func_name: str):
-    try:
-        import magictables_types.generated_types as generated_types
+def get_type_hint(func_name: str) -> Optional[Any]:
+    current_dir = os.getcwd()
+    types_file = os.path.join(current_dir, "magictables_types", "generated_types.py")
 
-        # Convert func_name to PascalCase
-        class_name = (
-            "".join(word.capitalize() for word in func_name.split("_")) + "Result"
-        )
-        return getattr(generated_types, class_name)
-    except (ImportError, AttributeError):
+    if not os.path.exists(types_file):
+        print(f"Warning: {types_file} not found. Types may need to be generated.")
         return None
+
+    spec = importlib.util.spec_from_file_location("generated_types", types_file)
+    generated_types = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(generated_types)
+
+    class_name = "".join(word.capitalize() for word in func_name.split("_")) + "Result"
+
+    return getattr(generated_types, class_name, None)
