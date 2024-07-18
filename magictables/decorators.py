@@ -2,11 +2,12 @@ import functools
 import json
 import hashlib
 import logging
+import sqlite3
 import uuid
 
 import pandas as pd
 from .database import get_connection, create_table, update_table_schema
-from typing import Any, Callable, Dict, List, TypeVar, cast
+from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar, cast
 from .schema_generator import get_type_hint, update_generated_types
 from typing import Callable, TypeVar
 
@@ -47,8 +48,11 @@ def get_sqlite_type(value):
 
 
 def create_tables_for_nested_data(
-    cursor, table_name: str, data: dict, parent_table: str = None
-):
+    cursor: sqlite3.Cursor,
+    table_name: str,
+    data: Dict[str, Any],
+    parent_table: Optional[str] = None,
+) -> Tuple[List[Tuple[str, str]], List[Tuple[str, Dict[str, Any]]]]:
     columns = []
     nested_tables = []
 
@@ -72,12 +76,14 @@ def create_tables_for_nested_data(
 
 
 def insert_nested_data(
-    cursor,
+    cursor: sqlite3.Cursor,
     table_name: str,
-    data: dict,
-    parent_reference_id: str = None,
-    table_structure: tuple = None,
-):
+    data: Dict[str, Any],
+    parent_reference_id: Optional[str] = None,
+    table_structure: Optional[
+        Tuple[List[Tuple[str, str]], List[Tuple[str, Dict[str, Any]]]]
+    ] = None,
+) -> str:
     columns, nested_tables = table_structure if table_structure else ([], [])
 
     cursor.execute(f"PRAGMA table_info([{sanitize_sql_name(table_name)}])")
@@ -330,15 +336,23 @@ def mtable() -> Callable[[Callable[..., T]], Callable[..., T]]:
     return decorator
 
 
+InputT = TypeVar("InputT")
+OutputT = TypeVar("OutputT")
+
+
 def mgen(
     api_key: str,
     base_url: str = "https://openrouter.ai/api/v1/chat/completions",
     model: str = "mistralai/mistral-7b-instruct",
     batch_size: int = 10,
-) -> Callable[[Callable[..., List[T]]], Callable[..., List[T]]]:
-    def decorator(func: Callable) -> Callable:
+) -> Callable[
+    [Callable[[List[InputT]], List[OutputT]]], Callable[[List[InputT]], List[OutputT]]
+]:
+    def decorator(
+        func: Callable[[List[InputT]], List[OutputT]]
+    ) -> Callable[[List[InputT]], List[OutputT]]:
         @functools.wraps(func)
-        def wrapper(*args, **kwargs):
+        def wrapper(*args: Any, **kwargs: Any) -> List[OutputT]:
             if len(args) > 0 and isinstance(args[0], List):
                 data = args[0]
             elif "data" in kwargs and isinstance(kwargs["data"], List):
@@ -431,9 +445,9 @@ def augment(
     model: str = "mistralai/mistral-7b-instruct",
     batch_size: int = 10,
 ) -> Callable[[Callable[..., pd.DataFrame]], Callable[..., pd.DataFrame]]:
-    def decorator(func: Callable) -> Callable:
+    def decorator(func: Callable[..., pd.DataFrame]) -> Callable[..., pd.DataFrame]:
         @functools.wraps(func)
-        def wrapper(*args, **kwargs):
+        def wrapper(*args: Any, **kwargs: Any) -> pd.DataFrame:
             # Call the original function
             df = func(*args, **kwargs)
 
