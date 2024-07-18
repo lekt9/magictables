@@ -1,16 +1,19 @@
+
 # MagicTables
 
-MagicTables is a Python library that provides easy-to-use decorators for caching API responses and augmenting function calls with AI-generated data. It's designed to simplify data retrieval and manipulation tasks in your Python projects, with a focus on working with DataFrames.
+MagicTables is a powerful Python library that creates a shadow queryable database for your captured data, simplifying data retrieval, caching, and analysis. It provides easy-to-use decorators for caching API responses and augmenting function calls with AI-generated data, while also offering advanced querying capabilities for your cached data.
 
 ## Features
 
-- Cache API responses in a local SQLite database
+- Create a shadow database that automatically captures and stores function results
+- Cache API responses and function outputs in a local SQLite database
 - Augment function calls with AI-generated data
-- Extend DataFrames with AI-generated columns
+- Perform complex queries on your captured data without modifying your original code
+- Join data from different function calls for advanced analysis
 - Easy-to-use decorators for quick integration
 - Supports various AI models through OpenRouter API
 - Simplifies ETL processes with post-transformations
-- Batch processing for efficient handling of large datasets
+- Query builder for constructing complex SQL queries without writing raw SQL
 
 ## Installation
 
@@ -23,7 +26,7 @@ pip install magictables
 ```python
 import os
 import pandas as pd
-from magictables import mtable, mchat
+from magictables import mtable, mchat, query_magic_db, QueryBuilder, execute_query
 import requests
 from dotenv import load_dotenv
 
@@ -55,36 +58,43 @@ data = {
 df = pd.DataFrame(data)
 extended_df = extend_user_data(df)
 print(extended_df)
+
+# Perform a complex query on the shadow database
+query = (
+    QueryBuilder()
+    .select("username", "company", "followers")
+    .from_table("magic_get_github_user")
+    .where("followers > 1000")
+    .order_by("followers DESC")
+    .limit(5)
+)
+
+top_users = execute_query(query)
+print("Top users:", top_users)
 ```
 
 ## How It Works
 
+MagicTables creates a shadow queryable database that automatically captures and stores the results of your function calls. This allows you to perform complex queries and analysis on your data without modifying your original code or data sources.
+
 ### @mtable()
 
-The `@mtable()` decorator caches the results of API calls or any function that returns JSON-serializable data. It stores the data in a local SQLite database, allowing for quick retrieval on subsequent calls with the same arguments.
+The `@mtable()` decorator automatically caches the results of API calls or any function that returns JSON-serializable data. It stores the data in a local SQLite database, allowing for quick retrieval on subsequent calls with the same arguments and enabling complex queries on the stored data.
 
 ### @mchat()
 
-The `@mchat()` decorator uses AI to augment function calls with additional data. It now supports working with DataFrames:
+The `@mchat()` decorator uses AI to augment function calls with additional data. It takes a DataFrame as input, processes each row using the AI model, extends the DataFrame with AI-generated columns, and caches the results for future use. This allows you to enrich your data with AI-generated insights seamlessly.
 
-1. It takes a DataFrame as input.
-2. Processes each row of the DataFrame using the AI model.
-3. Extends the DataFrame with AI-generated columns.
-4. Caches the results for future use.
+### Query Capabilities
 
-The decorator handles batch processing to efficiently work with large datasets and minimize API calls.
+MagicTables provides powerful querying capabilities for your shadow database:
 
-## Configuration
+1. `query_magic_db()`: Execute custom SQL queries on your captured data.
+2. `QueryBuilder`: Construct complex SQL queries using a fluent interface, without writing raw SQL.
+3. `join_magic_tables()`: Easily join data from different function calls for advanced analysis.
+4. `get_table_info()`: Retrieve schema information about all tables in your shadow database.
 
-To use the `@mchat()` decorator, you need to set up an API key for OpenRouter:
-
-1. Sign up for an account at [OpenRouter](https://openrouter.ai/)
-2. Obtain your API key
-3. Set the API key as an environment variable:
-
-```bash
-export OPENAI_API_KEY=your_api_key_here
-```
+These features allow you to perform advanced data analysis, generate reports, and extract insights from your captured data without affecting your original data sources or application logic.
 
 ## Advanced Usage
 
@@ -103,45 +113,66 @@ def custom_model_function(df: pd.DataFrame):
     return df
 ```
 
-### Handling Complex Data
+### Complex Querying
 
-Both decorators can handle complex nested data structures. The `@mtable()` decorator will automatically flatten and store nested JSON, while the `@mchat()` decorator can work with nested input in DataFrames and generate appropriate output.
-
-### Simplifying ETL Processes
-
-MagicTables simplifies the ETL (Extract, Transform, Load) process by allowing post-transformations after generating or querying data. This approach offers several advantages:
-
-1. Separation of concerns: The initial data retrieval or generation (Extract) is separated from the subsequent transformations, making the code more modular and easier to maintain.
-2. Flexibility in data manipulation: You can apply various transformations to the data after it has been retrieved or generated, allowing for dynamic adjustments based on specific needs or conditions.
-3. Reduced API calls: By caching the initial data and performing transformations on the cached results, you can reduce the number of API calls or expensive computations, improving performance and reducing costs.
-4. Iterative development: You can easily experiment with different transformations without having to re-fetch or regenerate the data each time, speeding up the development process.
-5. Consistency: Post-transformations ensure that the data is always processed in a consistent manner, regardless of whether it comes from the cache or a fresh API call.
-
-Example of post-transformation with DataFrame:
+MagicTables allows you to perform complex queries on your shadow database:
 
 ```python
-@mchat(api_key=os.environ["OPENAI_API_KEY"])
-def extend_user_data(df: pd.DataFrame):
-    # AI extends the DataFrame with additional columns
-    return df
+from magictables import query_magic_db, QueryBuilder, execute_query
 
-# Usage with post-transformation
-data = {
-    'username': ['octocat', 'torvalds', 'gvanrossum'],
-    'company': ['GitHub', 'Linux Foundation', 'Microsoft']
-}
-df = pd.DataFrame(data)
-extended_df = extend_user_data(df)
+# Execute a custom SQL query
+custom_query = """
+SELECT username, followers, company
+FROM magic_get_github_user
+WHERE followers > 1000
+ORDER BY followers DESC
+LIMIT 5
+"""
+top_users = query_magic_db(custom_query)
+print("Top users:", top_users)
 
-# Post-transformation
-transformed_df = extended_df.assign(
-    full_name=extended_df['first_name'] + ' ' + extended_df['last_name'],
-    is_famous=extended_df['followers'] > 10000
+# Use QueryBuilder for a complex query
+query = (
+    QueryBuilder()
+    .select("username", "company", "followers")
+    .from_table("magic_get_github_user")
+    .join("magic_extend_user_data", "magic_get_github_user.username = magic_extend_user_data.username")
+    .where("followers > 1000")
+    .order_by("followers DESC")
+    .limit(5)
 )
-print(transformed_df)
+
+complex_result = execute_query(query)
+print("Complex query result:", complex_result)
 ```
 
-In this example, the `extend_user_data` function extends the input DataFrame with AI-generated columns. The post-transformation step then processes this data to create new fields or modify existing ones, demonstrating the flexibility and simplicity of the ETL process with MagicTables.
+### Analyzing Data Across Multiple Functions
+
+MagicTables makes it easy to analyze data across multiple function calls:
+
+```python
+from magictables import join_magic_tables
+
+joined_data = join_magic_tables(
+    "magic_get_github_user",
+    "magic_extend_user_data",
+    "username",
+    ["magic_get_github_user.username", "magic_get_github_user.followers", "magic_extend_user_data.ai_generated_bio"]
+)
+print("Joined data:", joined_data)
+```
+
+## Why Use MagicTables?
+
+1. **Seamless Data Capture**: Automatically create a queryable database from your function calls without changing your existing code.
+2. **Improved Performance**: Cache expensive API calls and computations, reducing load on external services and speeding up your application.
+3. **Advanced Analysis**: Perform complex queries and joins on your captured data, enabling deeper insights and analytics.
+4. **AI-Powered Data Enrichment**: Easily augment your data with AI-generated insights using the `@mchat()` decorator.
+5. **Simplified ETL**: Use the shadow database as an intermediate step in your ETL processes, making data transformations and loading more efficient.
+6. **Rapid Prototyping**: Quickly experiment with different data analysis approaches without modifying your core application logic.
+7. **Reduced Data Transfer**: Minimize data transfer between your application and databases by querying the local shadow database.
+
+MagicTables empowers developers and data scientists to work with their data more efficiently, enabling advanced analytics and AI-driven insights without the need for complex data pipeline setups or modifications to existing codebases.
 
 ## Contributing
 
