@@ -53,18 +53,19 @@ def create_tables_for_nested_data(
     nested_tables = []
 
     for key, value in data.items():
+        sanitized_key = sanitize_sql_name(key)
         if isinstance(value, (str, int, float, bool)) or value is None:
-            columns.append((key, get_sqlite_type(value)))
+            columns.append((sanitized_key, get_sqlite_type(value)))
         elif isinstance(value, list) and value and isinstance(value[0], dict):
-            nested_tables.append((key, value[0]))
+            nested_tables.append((sanitized_key, value[0]))
 
-    create_table(cursor, table_name, parent_table)
-    update_table_schema(cursor, table_name, columns)
+    create_table(cursor, sanitize_sql_name(table_name), parent_table)
+    update_table_schema(cursor, sanitize_sql_name(table_name), columns)
 
     for nested_key, nested_data in nested_tables:
-        nested_table_name = f"{table_name}_{nested_key}"
+        nested_table_name = f"{sanitize_sql_name(table_name)}_{nested_key}"
         create_tables_for_nested_data(
-            cursor, nested_table_name, nested_data, table_name
+            cursor, nested_table_name, nested_data, sanitize_sql_name(table_name)
         )
 
     return columns, nested_tables
@@ -79,7 +80,7 @@ def insert_nested_data(
 ):
     columns, nested_tables = table_structure if table_structure else ([], [])
 
-    cursor.execute(f"PRAGMA table_info([{table_name}])")
+    cursor.execute(f"PRAGMA table_info([{sanitize_sql_name(table_name)}])")
     existing_columns = [row[1] for row in cursor.fetchall() if row[1] != "id"]
     values = []
     placeholders = []
@@ -96,8 +97,10 @@ def insert_nested_data(
         placeholders.append("?")
     print("Values:", values)
     # Use square brackets around column names
-    column_names = ", ".join(f"[{col}]" for col in existing_columns if col != "id")
-    query = f"INSERT INTO [{table_name}] ({column_names}) VALUES ({', '.join(placeholders)})"
+    column_names = ", ".join(
+        f"[{sanitize_sql_name(col)}]" for col in existing_columns if col != "id"
+    )
+    query = f"INSERT INTO [{sanitize_sql_name(table_name)}] ({column_names}) VALUES ({', '.join(placeholders)})"
     print("Query:", query)
 
     cursor.execute(query, values)
@@ -105,7 +108,9 @@ def insert_nested_data(
 
     for nested_key, _ in nested_tables:
         if nested_key in data:
-            nested_table_name = f"{table_name}_{nested_key}"
+            nested_table_name = (
+                f"{sanitize_sql_name(table_name)}_{sanitize_sql_name(nested_key)}"
+            )
             for item in data[nested_key]:
                 insert_nested_data(cursor, nested_table_name, item, reference_id)
 
@@ -157,12 +162,13 @@ def reconstruct_nested_data(
     # Fetch the main table data
     if parent_reference_id:
         cursor.execute(
-            f"SELECT * FROM [{base_table_name}] WHERE {base_table_name.rsplit('_', 1)[0]}_reference_id = ? AND reference_id = ?",
+            f"SELECT * FROM [{sanitize_sql_name(base_table_name)}] WHERE {sanitize_sql_name(base_table_name.rsplit('_', 1)[0])}_reference_id = ? AND reference_id = ?",
             (parent_reference_id, reference_id),
         )
     else:
         cursor.execute(
-            f"SELECT * FROM [{base_table_name}] WHERE reference_id = ?", (reference_id,)
+            f"SELECT * FROM [{sanitize_sql_name(base_table_name)}] WHERE reference_id = ?",
+            (reference_id,),
         )
     row = cursor.fetchone()
     if not row:
@@ -174,21 +180,23 @@ def reconstruct_nested_data(
         if col_name not in [
             "id",
             "reference_id",
-            f"{base_table_name.rsplit('_', 1)[0]}_reference_id",
+            f"{sanitize_sql_name(base_table_name.rsplit('_', 1)[0])}_reference_id",
             "local_id",
         ]:
             result[col_name] = row[idx]
 
     # Fetch and reconstruct nested data
     cursor.execute(
-        f"SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '{base_table_name}_%'"
+        f"SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '{sanitize_sql_name(base_table_name)}_%'"
     )
     nested_tables = [row[0] for row in cursor.fetchall()]
 
     for nested_table in nested_tables:
-        key = nested_table[len(base_table_name) + 1 :]  # Remove base_table_name_ prefix
+        key = nested_table[
+            len(sanitize_sql_name(base_table_name)) + 1 :
+        ]  # Remove base_table_name_ prefix
         cursor.execute(
-            f"SELECT * FROM [{nested_table}] WHERE {base_table_name}_reference_id = ?",
+            f"SELECT * FROM [{nested_table}] WHERE {sanitize_sql_name(base_table_name)}_reference_id = ?",
             (reference_id,),
         )
         nested_rows = cursor.fetchall()
@@ -249,7 +257,10 @@ def sanitize_sql_name(name):
     # Ensure the name starts with a letter or underscore
     if name and not name[0].isalpha() and name[0] != "_":
         name = "_" + name
-    return "".join(c if c.isalnum() or c == "_" else "_" for c in name)
+    # Replace spaces with underscores and remove any characters that are not alphanumeric or underscore
+    return "".join(
+        c if c.isalnum() or c == "_" else "_" for c in name.replace(" ", "_")
+    )
 
 
 def mtable() -> Callable[[Callable[..., T]], Callable[..., T]]:
