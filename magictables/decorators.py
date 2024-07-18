@@ -3,6 +3,8 @@ import json
 import hashlib
 import logging
 import uuid
+
+import pandas as pd
 from .database import get_connection, create_table, update_table_schema
 from typing import Any, Callable, Dict, List, TypeVar, cast
 from .schema_generator import get_type_hint
