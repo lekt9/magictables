@@ -202,9 +202,6 @@ MagicTables makes it easy to analyze data across multiple function calls:
 from magictables import join_magic_tables
 
 joined_data = join_magic_tables(
-Certainly! Here's the continuation of the README:
-
-```markdown
     "magic_get_github_user",
     "magic_extend_user_data",
     "username",
