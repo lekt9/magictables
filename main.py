@@ -22,7 +22,7 @@ print(cached_result_df)
 
 
 # Example usage
-@magictables.mchat(
+@magictables.mgen(
     api_key=os.getenv("OPENAI_API_KEY", ""),
     model=os.getenv(
         "OPENAI_BASE_MODEL",

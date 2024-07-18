@@ -1,33 +1,53 @@
-# magictables/schema_generator.py
-
 import os
 import sqlite3
-from typing import Dict, Any
+from typing import Dict, Any, Union, List, TypedDict
 
 
-def get_table_schema(cursor: sqlite3.Cursor, table_name: str) -> Dict[str, str]:
+def get_table_schema(
+    cursor: sqlite3.Cursor, table_name: str
+) -> Dict[str, Union[str, Dict]]:
     cursor.execute(f"PRAGMA table_info({table_name})")
     columns = cursor.fetchall()
-    return {
+    schema = {
         col[1]: col[2] for col in columns if col[1] != "id" and col[1] != "timestamp"
     }
 
+    # Check for nested tables
+    cursor.execute(
+        f"SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '{table_name}_%'"
+    )
+    nested_tables = cursor.fetchall()
+    for (nested_table_name,) in nested_tables:
+        nested_schema = get_table_schema(cursor, nested_table_name)
+        schema[nested_table_name[len(table_name) + 1 :]] = nested_schema
 
-def generate_type_definition(table_name: str, schema: Dict[str, str]) -> str:
+    return schema
+
+
+def generate_type_definition(
+    table_name: str, schema: Dict[str, Union[str, Dict]]
+) -> str:
     class_name = f"{table_name.capitalize()}Result"
     fields = []
     for column, dtype in schema.items():
-        if dtype == "TEXT":
-            field_type = "str"
-        elif dtype == "INTEGER":
-            field_type = "int"
-        elif dtype == "REAL":
-            field_type = "float"
-        elif dtype == "BLOB":
-            field_type = "Any"
+        if isinstance(dtype, dict):
+            nested_class_name = f"{table_name.capitalize()}{column.capitalize()}Result"
+            nested_type_definition = generate_type_definition(
+                f"{table_name}_{column}", dtype
+            )
+            fields.append(f"    {column}: List[{nested_class_name}]")
         else:
-            field_type = "Any"
-        fields.append(f"    {column}: {field_type}")
+            if dtype == "TEXT":
+                field_type = "str"
+            elif dtype == "INTEGER":
+                field_type = "int"
+            elif dtype == "REAL":
+                field_type = "float"
+            elif dtype == "BLOB":
+                field_type = "Any"
+            else:
+                field_type = "Any"
+            fields.append(f"    {column}: {field_type}")
 
     class_definition = f"class {class_name}(TypedDict):\n"
     class_definition += "\n".join(fields)

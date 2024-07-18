@@ -339,7 +339,7 @@ def mtable():
     return decorator
 
 
-def mchat(
+def mgen(
     api_key: str,
     base_url: str = "https://openrouter.ai/api/v1/chat/completions",
     model: str = "mistralai/mistral-7b-instruct",
@@ -389,52 +389,145 @@ def mchat(
                         row[0]: json.loads(row[1]) for row in cursor.fetchall()
                     }
 
-                    # Process only uncached items
-                    uncached_items = [
+                    # Process items not in the cache
+                    new_items = [
                         item
                         for item, key in zip(batch_dict, keys)
                         if key not in cached_results
                     ]
+                    new_keys = [key for key in keys if key not in cached_results]
 
-                    if uncached_items:
-                        # Get AI-generated data for uncached items
-                        ai_responses = parse_ai_response_batch(
-                            func.__name__, uncached_items, api_key, base_url, model
-                        )
+                    if new_items:
+                        # Call the decorated function with the new items
+                        new_results = func(new_items, *args[1:], **kwargs)
 
-                        # Update table schema and insert new data
-                        for item, response in zip(uncached_items, ai_responses):
-                            key = hashlib.md5(
-                                json.dumps(item, sort_keys=True).encode()
-                            ).hexdigest()
-                            update_table_schema(cursor, table_name, response.keys())
-                            columns = list(response.keys())
-                            placeholders = ", ".join(["?" for _ in columns])
-                            values = [response[col] for col in columns]
+                        # Insert new results into the database
+                        for key, result in zip(new_keys, new_results):
                             cursor.execute(
-                                f"INSERT OR REPLACE INTO [{table_name}] (id, response) VALUES (?, ?)",
-                                (key, json.dumps(response)),
+                                f"INSERT INTO [{table_name}] (id, response) VALUES (?, ?)",
+                                (key, json.dumps(result)),
                             )
-                            cached_results[key] = response
 
-                    conn.commit()
+                        # Update the cached_results dictionary with new results
+                        cached_results.update(dict(zip(new_keys, new_results)))
 
-                    # Combine cached and new results
+                    # Combine cached and new results in the original order
                     batch_results = [cached_results[key] for key in keys]
                     results.extend(batch_results)
+
+                conn.commit()
 
                 # Update generated types
                 update_generated_types(conn)
 
-                # Get the generated type hint
-                type_hint = get_type_hint(func.__name__)
+            # Get the generated type hint
+            type_hint = get_type_hint(func.__name__)
 
-                # Convert results to the generated type if available
-                if type_hint is not None:
-                    results = [type_hint(**item) for item in results]
+            # Convert results to the generated type if available
+            if type_hint is not None:
+                results = [type_hint(**result) for result in results]
 
-                # Call the original function with the results
-                return func(results, *args[1:], **kwargs)
+            return results
+
+        return wrapper
+
+    return decorator
+
+
+def augment(
+    api_key: str,
+    base_url: str = "https://openrouter.ai/api/v1/chat/completions",
+    model: str = "mistralai/mistral-7b-instruct",
+    batch_size: int = 10,
+):
+    def decorator(func: Callable) -> Callable:
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            # Call the original function
+            df = func(*args, **kwargs)
+
+            if not isinstance(df, pd.DataFrame):
+                raise ValueError(
+                    "The decorated function must return a pandas DataFrame"
+                )
+
+            table_name = f"ai_{func.__name__}"
+
+            with get_connection() as (conn, cursor):
+                create_table(cursor, table_name)
+
+                # Process the DataFrame in batches
+                for i in range(0, len(df), batch_size):
+                    batch = df.iloc[i : i + batch_size]
+                    batch_dict = batch.to_dict("records")
+
+                    # Generate keys for each item in the batch
+                    keys = [
+                        hashlib.md5(
+                            json.dumps(item, sort_keys=True).encode()
+                        ).hexdigest()
+                        for item in batch_dict
+                    ]
+
+                    # Check which items are already in the cache
+                    placeholders = ",".join(["?" for _ in keys])
+                    cursor.execute(
+                        f"SELECT id, response FROM [{table_name}] WHERE id IN ({placeholders})",
+                        keys,
+                    )
+                    cached_results = {
+                        row[0]: json.loads(row[1]) for row in cursor.fetchall()
+                    }
+
+                    # Process items not in the cache
+                    new_items = [
+                        item
+                        for item, key in zip(batch_dict, keys)
+                        if key not in cached_results
+                    ]
+                    new_keys = [key for key in keys if key not in cached_results]
+
+                    if new_items:
+                        # Call the AI model with the new items
+                        new_results = call_ai_model(new_items, api_key, base_url, model)
+
+                        # Insert new results into the database
+                        for key, result in zip(new_keys, new_results):
+                            cursor.execute(
+                                f"INSERT INTO [{table_name}] (id, response) VALUES (?, ?)",
+                                (key, json.dumps(result)),
+                            )
+
+                        # Update the cached_results dictionary with new results
+                        cached_results.update(dict(zip(new_keys, new_results)))
+
+                    # Combine cached and new results in the original order
+                    batch_results = [cached_results[key] for key in keys]
+
+                    # Add AI-generated columns to the DataFrame
+                    for idx, result in enumerate(batch_results):
+                        for key, value in result.items():
+                            df.loc[i + idx, f"ai_{key}"] = value
+
+                conn.commit()
+
+                # Update generated types
+                update_generated_types(conn)
+
+            # Get the generated type hint
+            type_hint = get_type_hint(func.__name__)
+
+            # Convert results to the generated type if available
+            if type_hint is not None:
+                df = df.astype(
+                    {
+                        col: type_hint.__annotations__[col]
+                        for col in type_hint.__annotations__
+                        if col in df.columns
+                    }
+                )
+
+            return df
 
         return wrapper
 
