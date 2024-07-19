@@ -140,23 +140,27 @@ def mtable(func: Optional[Callable] = None) -> Callable[[T], T]:
 
 
 def mai(
-    batch_size: int = 10, mode: str = "generate", query: Optional[str] = None
+    func: Optional[Callable] = None,
+    *,
+    batch_size: int = 10,
+    mode: str = "generate",
+    query: Optional[str] = None,
 ) -> Callable[[T], T]:
-    def decorator(func: T) -> T:
-        @functools.wraps(func)
+    def decorator(f: T) -> T:
+        @functools.wraps(f)
         def wrapper(*args: Any, **kwargs: Any) -> MagicDataFrame:
-            call_id = generate_call_id(func, *args, **kwargs)
-            table_name = sanitize_sql_name(f"ai_{func.__name__}")
+            call_id = generate_call_id(f, *args, **kwargs)
+            table_name = sanitize_sql_name(f"ai_{f.__name__}")
 
             with get_connection() as (conn, cursor):
                 cached_result = get_cached_result(cursor, table_name, call_id)
                 if cached_result is not None:
-                    print(f"Cache hit for {func.__name__}")
+                    print(f"Cache hit for {f.__name__}")
                     return MagicDataFrame(cached_result)
 
-                print(f"Cache miss for {func.__name__}")
+                print(f"Cache miss for {f.__name__}")
                 try:
-                    result = func(*args, **kwargs)
+                    result = f(*args, **kwargs)
                     result_df = ensure_dataframe(result)
                     data = result_df.to_dict("records")
 
@@ -187,7 +191,7 @@ def mai(
                     update_generated_types(conn)
                     type_hints = get_type_hints_for_table(conn, table_name)
                     RowType = create_typed_dict(
-                        f"{func.__name__}Row",
+                        f"{f.__name__}Row",
                         {k: eval(v) for k, v in type_hints.items()},
                     )
                     wrapper.__annotations__["return"] = MagicDataFrame[List[RowType]]
@@ -196,13 +200,16 @@ def mai(
                     result_df = result_df.drop(columns=["call_id"])
                     return MagicDataFrame(result_df)
                 except Exception as e:
-                    print(f"Error in {func.__name__}: {str(e)}")
+                    print(f"Error in {f.__name__}: {str(e)}")
                     conn.rollback()  # Rollback any changes made to the database
                     raise  # Re-raise the exception to be handled by the caller
 
         return cast(T, wrapper)
 
-    return decorator
+    if func is None:
+        return decorator
+    else:
+        return decorator(func)
 
 
 def process_batches(
