@@ -56,11 +56,13 @@ def call_ai_model(new_items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
         response_json = response.json()
         response_content = response_json["choices"][0]["message"]["content"]
-
-        # Extract JSON from the response
-        json_start = response_content.find("```json") + 7
-        json_end = response_content.rfind("```")
-        json_str = response_content[json_start:json_end].strip()
+        if "```json" in response_content:
+            # Extract JSON from the response
+            json_start = response_content.find("```json") + 7
+            json_end = response_content.rfind("```")
+            json_str = response_content[json_start:json_end].strip()
+        else:
+            json_str = response_content
 
         result = json.loads(json_str)
         results.append(result)

@@ -57,30 +57,6 @@ class MagicDataFrame(pd.DataFrame, Generic[RowType]):
     def __setstate__(self, state):
         super().__setstate__(state)
 
-    def transform(
-        self, func: Callable[[pd.DataFrame], pd.DataFrame]
-    ) -> "MagicDataFrame[RowType]":
-        """Apply a custom transformation function."""
-        return MagicDataFrame(func(self))
-
-    def filter(self, condition: Union[str, Callable]) -> "MagicDataFrame[RowType]":
-        """Filter the DataFrame based on a condition."""
-        if isinstance(condition, str):
-            return MagicDataFrame(self.query(condition))
-        return MagicDataFrame(self[self.apply(condition, axis=1)])
-
-    def select_columns(self, columns: List[str]) -> "MagicDataFrame[RowType]":
-        """Select specific columns."""
-        return MagicDataFrame(self[columns])
-
-    def rename_columns(self, column_map: Dict[str, str]) -> "MagicDataFrame[RowType]":
-        """Rename columns."""
-        return MagicDataFrame(self.rename(columns=column_map))
-
-    def to_dict_list(self) -> List[RowType]:
-        """Convert to a list of dictionaries."""
-        return self.to_dict("records")
-
 
 def generate_call_id(func: Callable, *args: Any, **kwargs: Any) -> str:
     """Generate a unique ID for a function call."""
@@ -131,6 +107,11 @@ def mtable(func: Optional[Callable] = None) -> Callable[[T], T]:
                 try:
                     result = f(*args, **kwargs)
                     result_df = ensure_dataframe(result)
+
+                    # Check if call_id is already in the DataFrame
+                    if "call_id" not in result_df.columns:
+                        result_df["call_id"] = call_id
+
                     columns = [
                         (str(col), infer_sqlite_type(dtype))
                         for col, dtype in result_df.dtypes.items()
@@ -138,6 +119,10 @@ def mtable(func: Optional[Callable] = None) -> Callable[[T], T]:
                     create_table(cursor, table_name, columns)
                     cache_result(cursor, table_name, call_id, result_df)
                     conn.commit()
+
+                    # Remove the 'call_id' column before returning
+                    if "call_id" in result_df.columns:
+                        result_df = result_df.drop(columns=["call_id"])
 
                     update_generated_types(conn)
                     type_hints = get_type_hints_for_table(conn, table_name)

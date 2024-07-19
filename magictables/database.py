@@ -153,7 +153,6 @@ def reconstruct_nested_data(
         )
         return df
 
-    # Use the first primary key for joining
     parent_key = parent_keys[0]
 
     if parent_key not in df.columns:
@@ -162,7 +161,6 @@ def reconstruct_nested_data(
         )
         return df
 
-    # Get nested tables
     cursor.execute(
         f"SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '{table_name}_%'"
     )
@@ -170,14 +168,12 @@ def reconstruct_nested_data(
 
     for nested_table in nested_tables:
         nested_table_name = nested_table[0]
-        nested_key = nested_table_name.split("_")[
-            -1
-        ]  # Assume the last part after '_' is the key name
-        nested_parent_key = f"{table_name}_id"  # Use consistent naming
+        nested_key = nested_table_name.split("_")[-1]
+        nested_parent_key = f"{table_name}_id"
 
         try:
             cursor.execute(
-                f"SELECT * FROM [{nested_table_name}] WHERE [{nested_parent_key}] IN ({','.join(['?']*len(df))})",
+                f"SELECT * FROM [{nested_table_name}] WHERE [{nested_parent_key}] IN ({','.join(['?']*len(df))}) ORDER BY [{nested_parent_key}], [index]",
                 df[parent_key].tolist(),
             )
             nested_rows = cursor.fetchall()
@@ -189,9 +185,9 @@ def reconstruct_nested_data(
                 )
                 df[nested_key] = df[parent_key].map(
                     reconstructed_nested_df.groupby(nested_parent_key).apply(
-                        lambda x: x.drop(
-                            columns=[nested_parent_key, "call_id"]
-                        ).to_dict("records")
+                        lambda x: x.sort_values("index")
+                        .drop(columns=[nested_parent_key, "index"])
+                        .to_dict("records")
                     )
                 )
         except sqlite3.OperationalError as e:
@@ -199,8 +195,8 @@ def reconstruct_nested_data(
                 f"Warning: Error processing nested table '{nested_table_name}': {str(e)}"
             )
 
-    # Remove internal columns
-    df = df.drop(columns=["call_id"] + parent_keys, errors="ignore")
+    # Keep the call_id column
+    df = df.drop(columns=parent_keys, errors="ignore")
     return df
 
 
@@ -361,24 +357,13 @@ def create_table(
         id_definition = "id INTEGER PRIMARY KEY AUTOINCREMENT"
 
     column_defs = [
-        f"[{col}] {col_type if col != 'id' else 'TEXT PRIMARY KEY'}"
+        f"[{col}] {col_type}"
         for col, col_type in columns
         if primary_keys is None or col not in primary_keys
     ]
-    if "id" not in [col for col, _ in columns]:
-        column_defs.append("id TEXT PRIMARY KEY")  # Change to TEXT
-    column_defs.append("call_id TEXT")
 
-    # Ensure the primary key is correctly placed
-    if primary_keys:
-        column_defs = [
-            (
-                f"[{col}] {col_type} PRIMARY KEY"
-                if col in primary_keys
-                else f"[{col}] {col_type}"
-            )
-            for col, col_type in columns
-        ]
+    # Add call_id if it's not already in the columns
+    if "call_id" not in [col for col, _ in columns]:
         column_defs.append("call_id TEXT")
 
     create_query = f"""
@@ -393,18 +378,15 @@ def create_table(
 def insert_nested_data(
     cursor: sqlite3.Cursor, table_name: str, data: pd.DataFrame, call_id: str
 ):
-    # Insert data into the main table
-    data = data.copy()  # Create a copy to avoid modifying the original DataFrame
+    data = data.copy()
     data["call_id"] = call_id
 
-    # Check if the table exists
     cursor.execute(
         f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table_name}'"
     )
     table_exists = cursor.fetchone() is not None
 
     if not table_exists:
-        # Create the table if it doesn't exist
         columns = [
             (str(col), infer_sqlite_type(dtype)) for col, dtype in data.dtypes.items()
         ]
@@ -416,11 +398,9 @@ def insert_nested_data(
     else:
         data.to_sql(table_name, cursor.connection, if_exists="append", index=False)
 
-    # Get the last inserted id
     cursor.execute("SELECT last_insert_rowid()")
     last_id = cursor.fetchone()[0]
 
-    # Handle nested data
     for col in data.columns:
         if primary_keys and col in primary_keys or col == "call_id":
             continue
@@ -431,6 +411,9 @@ def insert_nested_data(
                 nested_df = pd.json_normalize(data[col].dropna())
             elif isinstance(sample_value, list):
                 nested_df = pd.DataFrame(data[col].explode().dropna().tolist())
+                nested_df["index"] = nested_df.groupby(
+                    level=0
+                ).cumcount()  # Add index column
 
             if not nested_df.empty:
                 parent_id_col = f"{table_name}_id"
