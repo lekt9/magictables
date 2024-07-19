@@ -36,23 +36,6 @@ def check_cache_and_get_new_items(cursor, table_name, batch, keys):
     return cached_results, new_items, new_keys
 
 
-def cache_result(
-    cursor: sqlite3.Cursor, table_name: str, call_id: str, result: pd.DataFrame
-) -> None:
-    """Cache the result in the database."""
-    # Get the column types for the new data
-    new_columns = [
-        (str(col), infer_sqlite_type(dtype)) for col, dtype in result.dtypes.items()
-    ]
-
-    # Update the table schema if necessary
-    update_table_schema(cursor, table_name, new_columns)
-
-    # Now proceed with inserting the data
-    create_tables_for_nested_data(cursor, table_name, result)
-    insert_nested_data(cursor, table_name, result, call_id)
-
-
 def get_cached_result(
     cursor: sqlite3.Cursor, table_name: str, call_id: str
 ) -> Optional[pd.DataFrame]:
@@ -375,11 +358,33 @@ def create_table(
     cursor.execute(create_query)
 
 
+def cache_result(
+    cursor: sqlite3.Cursor, table_name: str, call_id: str, result: pd.DataFrame
+) -> None:
+    """Cache the result in the database."""
+    # Get the column types for the new data
+    new_columns = [
+        (str(col), infer_sqlite_type(dtype)) for col, dtype in result.dtypes.items()
+    ]
+
+    # Update the table schema if necessary
+    update_table_schema(cursor, table_name, new_columns)
+
+    # Now proceed with inserting the data
+    create_tables_for_nested_data(cursor, table_name, result)
+    insert_nested_data(cursor, table_name, result, call_id)
+
+
 def insert_nested_data(
     cursor: sqlite3.Cursor, table_name: str, data: pd.DataFrame, call_id: str
 ):
     data = data.copy()
     data["call_id"] = call_id
+
+    # Convert all columns to strings to avoid type issues
+    for col in data.columns:
+        if data[col].dtype == "object":
+            data[col] = data[col].astype(str)
 
     cursor.execute(
         f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table_name}'"
@@ -393,10 +398,11 @@ def insert_nested_data(
         create_table(cursor, table_name, columns)
 
     primary_keys = get_primary_key(cursor, table_name)
-    if primary_keys:
-        data.to_sql(table_name, cursor.connection, if_exists="append", index=False)
-    else:
-        data.to_sql(table_name, cursor.connection, if_exists="append", index=False)
+
+    # Use pandas to_sql with a custom method to handle data type conversion
+    data.to_sql(
+        table_name, cursor.connection, if_exists="append", index=False, method="multi"
+    )
 
     cursor.execute("SELECT last_insert_rowid()")
     last_id = cursor.fetchone()[0]

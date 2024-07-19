@@ -30,9 +30,6 @@ from magictables.database import (
 )
 from magictables.utils import call_ai_model, generate_ai_descriptions
 
-import pandas as pd
-from typing import Any, Callable, Dict, List, TypeVar, Generic
-
 T = TypeVar("T", bound=Callable[..., Any])
 
 RowType = TypeVar("RowType")
@@ -146,14 +143,21 @@ def mai(batch_size: int = 10, mode: str = "generate") -> Callable[[T], T]:
     def decorator(func: T) -> T:
         @functools.wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> MagicDataFrame:
-            try:
-                result = func(*args, **kwargs)
-                result_df = ensure_dataframe(result)
-                data = result_df.to_dict("records")
+            call_id = generate_call_id(func, *args, **kwargs)
+            table_name = sanitize_sql_name(f"ai_{func.__name__}")
 
-                table_name = f"ai_{func.__name__}"
+            with get_connection() as (conn, cursor):
+                cached_result = get_cached_result(cursor, table_name, call_id)
+                if cached_result is not None:
+                    print(f"Cache hit for {func.__name__}")
+                    return MagicDataFrame(cached_result)
 
-                with get_connection() as (conn, cursor):
+                print(f"Cache miss for {func.__name__}")
+                try:
+                    result = func(*args, **kwargs)
+                    result_df = ensure_dataframe(result)
+                    data = result_df.to_dict("records")
+
                     columns = [
                         (str(col), infer_sqlite_type(dtype))
                         for col, dtype in result_df.dtypes.items()
@@ -169,12 +173,9 @@ def mai(batch_size: int = 10, mode: str = "generate") -> Callable[[T], T]:
                     ]
                     update_table_schema(cursor, table_name, new_columns)
 
-                    cache_result(
-                        cursor,
-                        table_name,
-                        generate_call_id(func, *args, **kwargs),
-                        result_df,
-                    )
+                    # Add call_id to the result_df before caching
+                    result_df["call_id"] = call_id
+                    cache_result(cursor, table_name, call_id, result_df)
                     conn.commit()
 
                     generate_ai_descriptions(table_name, result_df.columns.tolist())
@@ -187,11 +188,13 @@ def mai(batch_size: int = 10, mode: str = "generate") -> Callable[[T], T]:
                     )
                     wrapper.__annotations__["return"] = MagicDataFrame[List[RowType]]
 
-                return MagicDataFrame(result_df)
-            except Exception as e:
-                print(f"Error in {func.__name__}: {str(e)}")
-                # If an error occurs, we don't store anything in the database
-                raise  # Re-raise the exception to be handled by the caller
+                    # Remove call_id before returning
+                    result_df = result_df.drop(columns=["call_id"])
+                    return MagicDataFrame(result_df)
+                except Exception as e:
+                    print(f"Error in {func.__name__}: {str(e)}")
+                    conn.rollback()  # Rollback any changes made to the database
+                    raise  # Re-raise the exception to be handled by the caller
 
         return cast(T, wrapper)
 
@@ -227,10 +230,19 @@ def combine_results(
     if mode == "generate":
         return MagicDataFrame(ai_results)
     elif mode == "augment":
+        # Create a copy of the original DataFrame to avoid modifying it directly
+        result_df = original_df.copy()
+
+        # Iterate through the AI results and add them to the corresponding rows
         for idx, ai_result in enumerate(ai_results):
-            for key, value in ai_result.items():
-                original_df.loc[idx, f"ai_{key}"] = value
-        return original_df
+            if idx < len(result_df):
+                for key, value in ai_result.items():
+                    result_df.loc[idx, f"ai_{key}"] = value
+            else:
+                # If we have more AI results than rows, we stop augmenting
+                break
+
+        return MagicDataFrame(result_df)
     else:
         raise ValueError("Invalid mode. Must be either 'generate' or 'augment'")
 
