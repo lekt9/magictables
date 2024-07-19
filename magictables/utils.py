@@ -1,7 +1,7 @@
 import requests
 import json
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from typing import Any, Dict, List, Union
 
 import os
@@ -19,7 +19,9 @@ OPENAI_BASE_URL = os.environ.get(
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 
 
-def call_ai_model(new_items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def call_ai_model(
+    new_items: List[Dict[str, Any]], query: Optional[str] = None
+) -> List[Dict[str, Any]]:
     headers = {
         "Authorization": f"Bearer {OPENAI_API_KEY}",
     }
@@ -32,6 +34,8 @@ def call_ai_model(new_items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             f"The current keys are: {json.dumps(item)}\n, you MUST only use these keys in the JSON you respond."
             f"Respond with it wrapped in ```json code block with a flat unnested JSON"
         )
+        if query:
+            prompt += f"\n\nQuery: {query}"
 
         data = {
             "model": OPENAI_MODEL,

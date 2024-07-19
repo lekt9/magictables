@@ -139,7 +139,9 @@ def mtable(func: Optional[Callable] = None) -> Callable[[T], T]:
     return decorator if func is None else decorator(func)
 
 
-def mai(batch_size: int = 10, mode: str = "generate") -> Callable[[T], T]:
+def mai(
+    batch_size: int = 10, mode: str = "generate", query: Optional[str] = None
+) -> Callable[[T], T]:
     def decorator(func: T) -> T:
         @functools.wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> MagicDataFrame:
@@ -163,7 +165,9 @@ def mai(batch_size: int = 10, mode: str = "generate") -> Callable[[T], T]:
                         for col, dtype in result_df.dtypes.items()
                     ]
                     create_table(cursor, table_name, columns)
-                    ai_results = process_batches(cursor, table_name, data, batch_size)
+                    ai_results = process_batches(
+                        cursor, table_name, data, batch_size, query
+                    )
                     result_df = combine_results(result_df, ai_results, mode)
 
                     # Update the table schema before caching the result
@@ -202,7 +206,11 @@ def mai(batch_size: int = 10, mode: str = "generate") -> Callable[[T], T]:
 
 
 def process_batches(
-    cursor: sqlite3.Cursor, table_name: str, data: List[Dict[str, Any]], batch_size: int
+    cursor: sqlite3.Cursor,
+    table_name: str,
+    data: List[Dict[str, Any]],
+    batch_size: int,
+    query: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     ai_results = []
     for i in range(0, len(data), batch_size):
@@ -216,7 +224,7 @@ def process_batches(
         )
 
         if new_items:
-            new_results = call_ai_model(new_items)
+            new_results = call_ai_model(new_items, query)
             cache_results(cursor, table_name, new_keys, new_results)
             cached_results.update(dict(zip(new_keys, new_results)))
 
