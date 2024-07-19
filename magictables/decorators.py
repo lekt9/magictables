@@ -57,9 +57,6 @@ class MagicDataFrame(pd.DataFrame, Generic[RowType]):
     def __setstate__(self, state):
         super().__setstate__(state)
 
-    def to_dict(self, orient="records"):
-        return super().to_dict(orient=orient)
-
     def transform(
         self, func: Callable[[pd.DataFrame], pd.DataFrame]
     ) -> "MagicDataFrame[RowType]":
@@ -83,10 +80,6 @@ class MagicDataFrame(pd.DataFrame, Generic[RowType]):
     def to_dict_list(self) -> List[RowType]:
         """Convert to a list of dictionaries."""
         return self.to_dict("records")
-
-    def to_json(self) -> str:
-        """Convert to JSON string."""
-        return self.to_json(orient="records")
 
 
 def generate_call_id(func: Callable, *args: Any, **kwargs: Any) -> str:
