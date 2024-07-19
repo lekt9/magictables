@@ -2,6 +2,7 @@ import requests
 import json
 import logging
 from typing import List, Dict, Any
+from typing import Any, Dict, List, Union
 
 import os
 import re
@@ -16,6 +17,52 @@ OPENAI_BASE_URL = os.environ.get(
     "OPENAI_BASE_URL", "https://openrouter.ai/api/v1/chat/completions"
 )
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+
+
+def call_ai_model(
+    data: Union[Dict[str, Any], List[Dict[str, Any]]],
+    api_key: str,
+    base_url: str,
+    model: str,
+) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
+
+    # Prepare the prompt
+    if isinstance(data, list):
+        prompt = f"Analyze and augment the following data:\n{json.dumps(data, indent=2)}\n\nProvide insights, summaries, or additional information for each item."
+    else:
+        prompt = f"Analyze and augment the following data:\n{json.dumps(data, indent=2)}\n\nProvide insights, summaries, or additional information."
+
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": "You are an AI assistant that analyzes and augments data.",
+            },
+            {"role": "user", "content": prompt},
+        ],
+    }
+
+    try:
+        response = requests.post(base_url, headers=headers, json=payload)
+        response.raise_for_status()
+        result = response.json()
+
+        # Extract the AI-generated content
+        ai_content = result["choices"][0]["message"]["content"]
+
+        # Parse the AI-generated content and combine it with the original data
+        func_name = "call_ai_model"  # or any other appropriate function name
+        augmented_data = parse_ai_response(
+            func_name, ai_content, api_key, base_url, model
+        )
+
+        return augmented_data
+
+    except requests.exceptions.RequestException as e:
+        print(f"Error calling AI model: {e}")
+        return data  # Return original data if there's an error
 
 
 def create_key(func_name, args, kwargs):

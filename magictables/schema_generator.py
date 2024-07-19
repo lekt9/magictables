@@ -5,6 +5,7 @@ import importlib.util
 import sqlite3
 
 from magictables.database import get_connection
+from magictables.utils import generate_ai_descriptions
 
 
 def get_table_schema(
