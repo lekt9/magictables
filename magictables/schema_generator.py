@@ -4,6 +4,8 @@ import os
 import importlib.util
 import sqlite3
 
+from magictables.database import get_connection
+
 
 def get_table_schema(
     cursor: sqlite3.Cursor, table_name: str
@@ -48,7 +50,22 @@ def get_type_hint(func_name: str) -> Optional[Any]:
 
     class_name = "".join(word.capitalize() for word in func_name.split("_")) + "Result"
 
-    return getattr(generated_types, class_name, None)
+    type_hint = getattr(generated_types, class_name, None)
+    if type_hint:
+        # Add AI descriptions to the type hint
+        table_name = f"magic_{func_name}"
+        with get_connection() as (conn, cursor):
+            schema = get_table_schema(cursor, table_name)
+        ai_descriptions = generate_ai_descriptions(table_name, list(schema.keys()))
+        type_hint.__doc__ = ai_descriptions["table_description"]
+        for field in type_hint.__annotations__:
+            if field in ai_descriptions["column_descriptions"]:
+                type_hint.__annotations__[field] = (
+                    type_hint.__annotations__[field],
+                    ai_descriptions["column_descriptions"][field],
+                )
+
+    return type_hint
 
 
 def update_generated_types(conn: sqlite3.Connection):

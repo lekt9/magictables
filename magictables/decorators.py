@@ -1,3 +1,4 @@
+import numpy as np
 import functools
 import json
 import hashlib
@@ -6,20 +7,18 @@ import re
 import sqlite3
 import pandas as pd
 import requests
+from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar, Union
+from pandas.api.extensions import register_dataframe_accessor
+import os
+from dotenv import load_dotenv
+
 from .database import get_connection, create_table, update_table_schema
-from .schema_generator import get_type_hint, update_generated_types
-from typing import (
-    Any,
-    Callable,
-    Dict,
-    List,
-    Optional,
-    Tuple,
-    TypeVar,
-    cast,
-    Union,
-    Literal,
-    Hashable,
+from .schema_generator import get_table_schema, get_type_hint, update_generated_types
+from .utils import (
+    OPENAI_API_KEY,
+    OPENAI_BASE_URL,
+    OPENAI_MODEL,
+    generate_ai_descriptions,
 )
 
 T = TypeVar("T")
@@ -28,58 +27,63 @@ T = TypeVar("T")
 logging.basicConfig(level=logging.CRITICAL)
 
 
-class ChainableMagicTable:
-    def __init__(
-        self,
-        data: Union[pd.DataFrame, List[Dict[str, Any]]],
-        func_name: Optional[str] = None,
-    ):
-        if isinstance(data, pd.DataFrame):
-            self.df = data
-        else:
-            self.df = pd.DataFrame(data)
+@register_dataframe_accessor("magic")
+class MagicTableAccessor:
+    def __init__(self, pandas_obj):
+        self._obj = pandas_obj
+        self.func_name = None
+        self.type_hint = None
 
+    def set_func_name(self, func_name):
+        self.func_name = func_name
         self.type_hint = get_type_hint(func_name) if func_name else None
+        return self._obj
 
-    def join(
-        self,
-        other: "ChainableMagicTable",
-        how: str = "inner",
-        on: Optional[Union[str, List[str]]] = None,
-    ) -> "ChainableMagicTable":
-        self.df = self.df.merge(other.df, how=how, on=on)
-        return self
-
-    from pandas._typing import Axis
-
-    def concat(
-        self, other: "ChainableMagicTable", axis: Axis = 0
-    ) -> "ChainableMagicTable":
-        self.df = pd.concat([self.df, other.df], axis=axis)
-        return self
-
-    def apply(
-        self, func: Callable[[pd.DataFrame], pd.DataFrame]
-    ) -> "ChainableMagicTable":
-        self.df = func(self.df)
-        return self
-
-    def to_dataframe(self) -> pd.DataFrame:
-        return self.df
-
-    def to_dict(
-        self,
-        orient: Literal[
-            "dict", "list", "series", "split", "records", "index"
-        ] = "records",
-    ) -> Union[Dict[Hashable, Any], List[Dict[Hashable, Any]]]:
-        return self.df.to_dict(orient)
-
-    def to_typed_dict(self) -> Union[Dict[Hashable, Any], List[Dict[Hashable, Any]]]:
+    def to_typed_dict(self):
         if self.type_hint:
-            return [self.type_hint(**row) for _, row in self.df.iterrows()]
+            return [self.type_hint(**row) for _, row in self._obj.iterrows()]
         else:
-            return self.to_dict()
+            return self._obj.to_dict(orient="records")
+
+    def get_column_types(self):
+        with get_connection() as (conn, cursor):
+            table_name = sanitize_sql_name(f"magic_{self.func_name}")
+            schema = get_table_schema(cursor, table_name)
+        return {
+            col: get_pandas_type(
+                type_info[0] if isinstance(type_info, (tuple, list)) else type_info
+            )
+            for col, type_info in schema.items()
+            if col in self._obj.columns
+        }
+
+
+def create_magic_table(data, func_name=None):
+    if isinstance(data, pd.DataFrame):
+        df = data
+    elif isinstance(data, list) and all(isinstance(item, dict) for item in data):
+        df = pd.DataFrame(data)
+    elif isinstance(data, dict):
+        df = pd.DataFrame([data])
+    else:
+        raise ValueError(f"Unsupported data type: {type(data)}")
+
+    # Get the schema information
+    with get_connection() as (conn, cursor):
+        table_name = sanitize_sql_name(f"magic_{func_name}")
+        schema = get_table_schema(cursor, table_name)
+
+    # Set the column types based on the schema
+    for column, type_info in schema.items():
+        if column in df.columns:
+            df[column] = df[column].astype(get_pandas_type(type_info[0]))
+
+    # Generate AI descriptions and update DataFrame metadata
+    ai_descriptions = generate_ai_descriptions(table_name, df.columns.tolist())
+    df.attrs["table_description"] = ai_descriptions["table_description"]
+    df.attrs["column_descriptions"] = ai_descriptions["column_descriptions"]
+
+    return df.magic.set_func_name(func_name)
 
 
 def flatten_dict(d: Dict, parent_key: str = "", sep: str = "_") -> Dict:
@@ -93,6 +97,20 @@ def flatten_dict(d: Dict, parent_key: str = "", sep: str = "_") -> Dict:
         else:
             items.append((new_key, v))
     return dict(items)
+
+
+def get_pandas_type(sqlite_type):
+    type_mapping = {
+        "INTEGER": np.int64,
+        "REAL": np.float64,
+        "TEXT": object,
+        "BLOB": object,
+        "NULL": object,
+    }
+    # If sqlite_type is a tuple or list, use the first element
+    if isinstance(sqlite_type, (tuple, list)):
+        sqlite_type = sqlite_type[0]
+    return type_mapping.get(sqlite_type, object)
 
 
 def get_sqlite_type(value):
@@ -140,56 +158,6 @@ def create_tables_for_nested_data(
     return columns, nested_tables
 
 
-def call_ai_model(
-    new_items: List[Dict[str, Any]], api_key: str, base_url: str, model: str
-) -> List[Dict[str, Any]]:
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-    }
-
-    results = []
-    for item in new_items:
-        prompt = (
-            f"You are the all knowing JSON generator. Given the function arguments, "
-            f"Create a JSON object that populates the missing, or incomplete columns for the function call."
-            f"The current keys are: {json.dumps(item)}\n, you MUST only use these keys in the JSON you respond."
-            f"Respond with it wrapped in ```json code block with a flat unnested JSON"
-        )
-
-        data = {
-            "model": model,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
-            ],
-            "response_format": {"type": "json_object"},
-        }
-
-        # Call OpenAI/OpenRouter API
-        response = requests.post(url=base_url, headers=headers, data=json.dumps(data))
-
-        if response.status_code != 200:
-            raise Exception(
-                f"OpenRouter API request failed with status code {response.status_code}: {response.text}"
-            )
-
-        response_json = response.json()
-        response_data = re.search(
-            r"```(?:json)?\s*([\s\S]*?)\s*```",
-            response_json["choices"][0]["message"]["content"],
-        )
-        if response_data:
-            response_data = json.loads(response_data.group(1).strip())
-        else:
-            raise ValueError("No JSON content found in the response")
-
-        results.append(response_data)
-
-    return results
-
-
 def cache_results(
     cursor: sqlite3.Cursor,
     table_name: str,
@@ -205,7 +173,6 @@ def cache_results(
         for column in result.keys():
             if column not in existing_columns and column not in ["id", "timestamp"]:
                 cursor.execute(f"ALTER TABLE [{table_name}] ADD COLUMN [{column}] TEXT")
-
         # Prepare the data for insertion
         columns = list(result.keys())
         placeholders = ", ".join(["?" for _ in columns])
@@ -218,112 +185,9 @@ def cache_results(
             f"""
             INSERT OR REPLACE INTO [{table_name}] (id, {', '.join(columns)})
             VALUES (?, {placeholders})
-Certainly! Here's the continuation of the decorators.py file:
-
-```python
             """,
             (key, *values),
         )
-
-
-def insert_nested_data(
-    cursor: sqlite3.Cursor,
-    table_name: str,
-    data: Dict[str, Any],
-    call_id: str,
-    table_structure: Optional[
-        Tuple[List[Tuple[str, str]], List[Tuple[str, Dict[str, Any]]]]
-    ] = None,
-) -> str:
-    columns, nested_tables = table_structure if table_structure else ([], [])
-
-    cursor.execute(f"PRAGMA table_info([{sanitize_sql_name(table_name)}])")
-    existing_columns = [
-        row[1] for row in cursor.fetchall() if row[1] not in ["id", "call_id"]
-    ]
-
-    # Check if entry already exists
-    cursor.execute(
-        f"SELECT * FROM [{sanitize_sql_name(table_name)}] WHERE call_id = ?", (call_id,)
-    )
-    existing_entry = cursor.fetchone()
-
-    if existing_entry:
-        # Update existing entry
-        set_clause = ", ".join([f"[{col}] = ?" for col in existing_columns])
-        update_query = f"UPDATE [{sanitize_sql_name(table_name)}] SET {set_clause} WHERE call_id = ?"
-        values = [data.get(col, None) for col in existing_columns] + [call_id]
-        cursor.execute(update_query, values)
-    else:
-        # Insert new entry
-        columns = ["call_id"] + existing_columns
-        placeholders = ", ".join(["?" for _ in columns])
-        insert_query = f"INSERT INTO [{sanitize_sql_name(table_name)}] ({', '.join(columns)}) VALUES ({placeholders})"
-        values = [call_id] + [data.get(col, None) for col in existing_columns]
-        cursor.execute(insert_query, values)
-
-    reference_id = call_id
-
-    for nested_key, _ in nested_tables:
-        if nested_key in data:
-            nested_table_name = (
-                f"{sanitize_sql_name(table_name)}_{sanitize_sql_name(nested_key)}"
-            )
-            for item in data[nested_key]:
-                insert_nested_data(
-                    cursor, nested_table_name, item, f"{call_id}_{nested_key}"
-                )
-
-    return reference_id
-
-
-def reconstruct_nested_data(cursor, base_table_name: str, call_id: str) -> Dict:
-    result = {}
-
-    cursor.execute(
-        f"SELECT * FROM [{sanitize_sql_name(base_table_name)}] WHERE call_id = ?",
-        (call_id,),
-    )
-    row = cursor.fetchone()
-    if not row:
-        return result
-
-    # Reconstruct the main table data
-    result = json.loads(row[3])  # Assuming 'data' is the 4th column
-
-    # Fetch and reconstruct nested data
-    cursor.execute(
-        f"SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '{sanitize_sql_name(base_table_name)}_%'"
-    )
-    nested_tables = [row[0] for row in cursor.fetchall()]
-
-    for nested_table in nested_tables:
-        key = nested_table[
-            len(sanitize_sql_name(base_table_name)) + 1 :
-        ]  # Remove base_table_name_ prefix
-        cursor.execute(
-            f"SELECT * FROM [{nested_table}] WHERE call_id LIKE ?",
-            (f"{call_id}_%",),
-        )
-        nested_rows = cursor.fetchall()
-
-        if nested_rows:
-            result[key] = [
-                json.loads(row[3]) for row in nested_rows
-            ]  # Assuming 'data' is the 4th column
-
-    return result
-
-
-def convert_to_supported_type(value):
-    if isinstance(value, (int, float, str, bytes, type(None))):
-        return value
-    elif isinstance(value, bool):
-        return int(value)
-    elif isinstance(value, (list, dict)):
-        return json.dumps(value)
-    else:
-        return str(value)
 
 
 def sanitize_sql_name(name):
@@ -336,10 +200,10 @@ def sanitize_sql_name(name):
     )
 
 
-def mtable() -> Callable[[Callable[..., T]], Callable[..., ChainableMagicTable]]:
+def mtable() -> Callable[[Callable[..., T]], Callable[..., pd.DataFrame]]:
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
-        def wrapper(*args, **kwargs) -> ChainableMagicTable:
+        def wrapper(*args, **kwargs) -> pd.DataFrame:
             call_id = hashlib.md5(
                 json.dumps((func.__name__, args, kwargs), sort_keys=True).encode()
             ).hexdigest()
@@ -365,22 +229,28 @@ def mtable() -> Callable[[Callable[..., T]], Callable[..., ChainableMagicTable]]
                     result = func(*args, **kwargs)
 
                     if result is not None:
-                        if isinstance(result, pd.DataFrame):
-                            return ChainableMagicTable(result, func.__name__)
-                        elif isinstance(result, list) and all(
-                            isinstance(item, dict) for item in result
-                        ):
-                            return ChainableMagicTable(result, func.__name__)
-                        elif isinstance(result, dict):
-                            return ChainableMagicTable([result], func.__name__)
-                        else:
-                            raise ValueError(
-                                f"Unsupported return type from {func.__name__}: {type(result)}"
-                            )
+                        df = create_magic_table(result, func.__name__)
+                        # Update the schema based on the new data
+                        update_table_schema(
+                            cursor,
+                            base_table_name,
+                            [
+                                (col, get_sqlite_type(df[col].iloc[0]))
+                                for col in df.columns
+                            ],
+                        )
+                        conn.commit()
+
+                        # Generate AI descriptions and update types
+                        ai_descriptions = generate_ai_descriptions(
+                            base_table_name, df.columns.tolist()
+                        )
+
+                        return df
                     else:
                         raise ValueError(f"Function {func.__name__} returned None")
 
-            return ChainableMagicTable(result, func.__name__)
+            return create_magic_table(result, func.__name__)
 
         return wrapper
 
@@ -388,15 +258,12 @@ def mtable() -> Callable[[Callable[..., T]], Callable[..., ChainableMagicTable]]
 
 
 def mai(
-    api_key: str,
-    base_url: str = "https://openrouter.ai/api/v1/chat/completions",
-    model: str = "mistralai/mistral-7b-instruct",
     batch_size: int = 10,
     mode: str = "generate",  # Can be "generate" or "augment"
-) -> Callable[[Callable[..., Any]], Callable[..., ChainableMagicTable]]:
-    def decorator(func: Callable[..., Any]) -> Callable[..., ChainableMagicTable]:
+) -> Callable[[Callable[..., Any]], Callable[..., pd.DataFrame]]:
+    def decorator(func: Callable[..., Any]) -> Callable[..., pd.DataFrame]:
         @functools.wraps(func)
-        def wrapper(*args: Any, **kwargs: Any) -> ChainableMagicTable:
+        def wrapper(*args: Any, **kwargs: Any) -> pd.DataFrame:
             # Call the original function
             result = func(*args, **kwargs)
 
@@ -437,14 +304,18 @@ def mai(
 
                     if new_items:
                         # Call AI model for new items
-                        new_results = call_ai_model(new_items, api_key, base_url, model)
+                        new_results = call_ai_model(new_items)
                         cache_results(cursor, table_name, new_keys, new_results)
                         cached_results.update(dict(zip(new_keys, new_results)))
 
                     ai_results.extend([cached_results[key] for key in keys])
 
                 conn.commit()
-                update_generated_types(conn)
+
+                # Generate AI descriptions and update types
+                ai_descriptions = generate_ai_descriptions(
+                    table_name, result.columns.tolist()
+                )
 
             # Process the results based on the mode and input type
             if mode == "generate":
@@ -463,13 +334,7 @@ def mai(
             else:
                 raise ValueError("Invalid mode. Must be either 'generate' or 'augment'")
 
-            # Add type assertion here
-            if isinstance(final_result, pd.DataFrame):
-                return ChainableMagicTable(final_result, func.__name__)
-            else:
-                return ChainableMagicTable(
-                    cast(List[Dict[str, Any]], final_result), func.__name__
-                )
+            return create_magic_table(final_result, func.__name__)
 
         return wrapper
 
@@ -487,3 +352,52 @@ def check_cache_and_get_new_items(cursor, table_name, batch, keys):
     new_items = [item for item, key in zip(batch, keys) if key not in cached_results]
     new_keys = [key for key in keys if key not in cached_results]
     return cached_results, new_items, new_keys
+
+
+def call_ai_model(new_items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+    }
+
+    results = []
+    for item in new_items:
+        prompt = (
+            f"You are the all knowing JSON generator. Given the function arguments, "
+            f"Create a JSON object that populates the missing, or incomplete columns for the function call."
+            f"The current keys are: {json.dumps(item)}\n, you MUST only use these keys in the JSON you respond."
+            f"Respond with it wrapped in ```json code block with a flat unnested JSON"
+        )
+
+        data = {
+            "model": OPENAI_MODEL,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": prompt,
+                }
+            ],
+            "response_format": {"type": "json_object"},
+        }
+
+        # Call OpenAI/OpenRouter API
+        response = requests.post(
+            url=OPENAI_BASE_URL, headers=headers, data=json.dumps(data)
+        )
+
+        if response.status_code != 200:
+            raise Exception(
+                f"OpenAI API request failed with status code {response.status_code}: {response.text}"
+            )
+
+        response_json = response.json()
+        response_content = response_json["choices"][0]["message"]["content"]
+
+        # Extract JSON from the response
+        json_start = response_content.find("```json") + 7
+        json_end = response_content.rfind("```")
+        json_str = response_content[json_start:json_end].strip()
+
+        result = json.loads(json_str)
+        results.append(result)
+
+    return results  # Move this line outside of the for loop

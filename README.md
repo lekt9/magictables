@@ -78,6 +78,8 @@ json_result = (
 print(json_result)
 ```
 
+# Be SURE to always use load_dotenv() BEFORE importing magictables if you want to use ai documented dataframe descriptions!
+
 ## How It Works
 
 MagicTables creates a shadow queryable database that automatically captures and stores the results of your function calls. This allows you to perform complex queries and analysis on your data without modifying your original code or data sources.

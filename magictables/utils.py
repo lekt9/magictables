@@ -1,7 +1,21 @@
+import requests
 import json
+import logging
+from typing import List, Dict, Any
+
+import os
 import re
+from dotenv import load_dotenv
 import requests
 from hashlib import md5
+
+load_dotenv()
+
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+OPENAI_BASE_URL = os.environ.get(
+    "OPENAI_BASE_URL", "https://openrouter.ai/api/v1/chat/completions"
+)
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 
 
 def create_key(func_name, args, kwargs):
@@ -66,3 +80,82 @@ def parse_ai_response_batch(func_name, rows, api_key, base_url, model):
         return json.loads(response_data.group(1).strip())
     else:
         raise ValueError("No JSON content found in the response")
+
+
+def generate_ai_descriptions(table_name: str, columns: List[str]) -> Dict[str, Any]:
+    """
+    Generate AI descriptions for a table and its columns using OpenRouter API.
+    If API key is not available or there's an error, return default descriptions.
+
+    Args:
+    table_name (str): The name of the table.
+    columns (List[str]): List of column names in the table.
+
+    Returns:
+    Dict[str, Any]: A dictionary containing the table description and column descriptions.
+    """
+    if not OPENAI_API_KEY:
+        logging.warning("OpenAI API key not found. Using default descriptions.")
+        return generate_default_descriptions(table_name, columns)
+
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        # Generate table description
+        table_description = get_ai_description(
+            f"Describe the purpose and content of a database table named '{table_name}' in one sentence.",
+            headers,
+        )
+
+        # Generate column descriptions
+        column_descriptions = {}
+        for column in columns:
+            column_description = get_ai_description(
+                f"Describe the purpose and content of a database column named '{column}' in the table '{table_name}' in one sentence.",
+                headers,
+            )
+            column_descriptions[column] = column_description
+
+        return {
+            "table_description": table_description,
+            "column_descriptions": column_descriptions,
+        }
+
+    except Exception as e:
+        logging.error(f"Error generating AI descriptions: {str(e)}")
+        return generate_default_descriptions(table_name, columns)
+
+
+def get_ai_description(prompt: str, headers: Dict[str, str]) -> str:
+    """Helper function to get AI description from OpenRouter API."""
+    response = requests.post(
+        OPENAI_BASE_URL,
+        headers=headers,
+        json={
+            "model": OPENAI_MODEL,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a helpful assistant that describes database tables and columns.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+        },
+    )
+    response.raise_for_status()
+    return response.json()["choices"][0]["message"]["content"].strip()
+
+
+def generate_default_descriptions(
+    table_name: str, columns: List[str]
+) -> Dict[str, Any]:
+    """Generate default descriptions when AI generation is not available."""
+    return {
+        "table_description": f"Table containing data related to {table_name}.",
+        "column_descriptions": {
+            column: f"Column in {table_name} table." for column in columns
+        },
+    }
