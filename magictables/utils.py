@@ -19,50 +19,53 @@ OPENAI_BASE_URL = os.environ.get(
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 
 
-def call_ai_model(
-    data: Union[Dict[str, Any], List[Dict[str, Any]]],
-    api_key: str,
-    base_url: str,
-    model: str,
-) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
-
-    # Prepare the prompt
-    if isinstance(data, list):
-        prompt = f"Analyze and augment the following data:\n{json.dumps(data, indent=2)}\n\nProvide insights, summaries, or additional information for each item."
-    else:
-        prompt = f"Analyze and augment the following data:\n{json.dumps(data, indent=2)}\n\nProvide insights, summaries, or additional information."
-
-    payload = {
-        "model": model,
-        "messages": [
-            {
-                "role": "system",
-                "content": "You are an AI assistant that analyzes and augments data.",
-            },
-            {"role": "user", "content": prompt},
-        ],
+def call_ai_model(new_items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
     }
 
-    try:
-        response = requests.post(base_url, headers=headers, json=payload)
-        response.raise_for_status()
-        result = response.json()
-
-        # Extract the AI-generated content
-        ai_content = result["choices"][0]["message"]["content"]
-
-        # Parse the AI-generated content and combine it with the original data
-        func_name = "call_ai_model"  # or any other appropriate function name
-        augmented_data = parse_ai_response(
-            func_name, ai_content, api_key, base_url, model
+    results = []
+    for item in new_items:
+        prompt = (
+            f"You are the all knowing JSON generator. Given the function arguments, "
+            f"Create a JSON object that populates the missing, or incomplete columns for the function call."
+            f"The current keys are: {json.dumps(item)}\n, you MUST only use these keys in the JSON you respond."
+            f"Respond with it wrapped in ```json code block with a flat unnested JSON"
         )
 
-        return augmented_data
+        data = {
+            "model": OPENAI_MODEL,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": prompt,
+                }
+            ],
+            "response_format": {"type": "json_object"},
+        }
 
-    except requests.exceptions.RequestException as e:
-        print(f"Error calling AI model: {e}")
-        return data  # Return original data if there's an error
+        # Call OpenAI/OpenRouter API
+        response = requests.post(
+            url=OPENAI_BASE_URL, headers=headers, data=json.dumps(data)
+        )
+
+        if response.status_code != 200:
+            raise Exception(
+                f"OpenAI API request failed with status code {response.status_code}: {response.text}"
+            )
+
+        response_json = response.json()
+        response_content = response_json["choices"][0]["message"]["content"]
+
+        # Extract JSON from the response
+        json_start = response_content.find("```json") + 7
+        json_end = response_content.rfind("```")
+        json_str = response_content[json_start:json_end].strip()
+
+        result = json.loads(json_str)
+        results.append(result)
+
+    return results  # Move this line outside of the for loop
 
 
 def create_key(func_name, args, kwargs):

@@ -1,6 +1,7 @@
 from contextlib import contextmanager
+import json
 import sqlite3
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
@@ -16,6 +17,39 @@ def get_connection():
     finally:
         cursor.close()
         conn.close()
+
+
+def check_cache_and_get_new_items(cursor, table_name, batch, keys):
+    placeholders = ",".join(["?" for _ in keys])
+    cursor.execute(
+        f"SELECT id, response FROM [{table_name}] WHERE id IN ({placeholders})",
+        keys,
+    )
+    cached_results = {row[0]: json.loads(row[1]) for row in cursor.fetchall()}
+    new_items = [item for item, key in zip(batch, keys) if key not in cached_results]
+    new_keys = [key for key in keys if key not in cached_results]
+    return cached_results, new_items, new_keys
+
+
+def cache_result(
+    cursor: sqlite3.Cursor, table_name: str, call_id: str, result: pd.DataFrame
+) -> None:
+    """Cache the result in the database."""
+    create_tables_for_nested_data(cursor, table_name, result)
+    insert_nested_data(cursor, table_name, result, call_id)
+
+
+def cache_results(
+    cursor: sqlite3.Cursor,
+    table_name: str,
+    keys: List[str],
+    results: List[Dict[str, Any]],
+) -> None:
+    for key, result in zip(keys, results):
+        cursor.execute(
+            f"INSERT INTO [{table_name}] (id, response) VALUES (?, ?)",
+            (key, json.dumps(result)),
+        )
 
 
 def get_cached_result(
@@ -39,17 +73,40 @@ def get_cached_result(
     return None
 
 
-def get_sqlite_type(value: Any) -> str:
-    if isinstance(value, int):
-        return "INTEGER"
-    elif isinstance(value, float):
-        return "REAL"
-    elif isinstance(value, bool):
-        return "INTEGER"  # SQLite doesn't have a boolean type, so we use INTEGER
-    elif isinstance(value, str):
-        return "TEXT"
+def create_table(cursor: sqlite3.Cursor, table_name: str, df: pd.DataFrame):
+    # Get the column names and types from the DataFrame
+    columns = df.dtypes.to_dict()
+
+    # Determine the primary key
+    if "id" in columns:
+        primary_key = "id"
     else:
-        return "TEXT"  # Default to TEXT for complex types
+        # Use the first column as the primary key if 'id' doesn't exist
+        primary_key = df.columns[0]
+
+    # Create the table
+    column_defs = [
+        f"[{col}] {get_sqlite_type(dtype)}" for col, dtype in columns.items()
+    ]
+    column_defs.append("call_id TEXT")
+    primary_key_def = f"PRIMARY KEY ([{primary_key}])"
+
+    create_query = f"""
+    CREATE TABLE IF NOT EXISTS [{table_name}] (
+        {', '.join(column_defs)},
+        {primary_key_def}
+    )
+    """
+    cursor.execute(create_query)
+
+
+def get_sqlite_type(dtype):
+    if pd.api.types.is_integer_dtype(dtype):
+        return "INTEGER"
+    elif pd.api.types.is_float_dtype(dtype):
+        return "REAL"
+    else:
+        return "TEXT"
 
 
 def update_table_schema(
@@ -174,156 +231,38 @@ def sanitize_sql_name(name: str) -> str:
 
 
 def create_tables_for_nested_data(
-    cursor: sqlite3.Cursor,
-    table_name: str,
-    data: pd.DataFrame,
-    parent_table: Optional[str] = None,
-    parent_key: Optional[str] = None,
-) -> None:
-    columns = []
-    nested_tables = []
-    primary_key = None
+    cursor: sqlite3.Cursor, table_name: str, data: pd.DataFrame
+):
+    create_table(cursor, table_name, data)
 
     for col in data.columns:
         sample_value = data[col].iloc[0] if len(data) > 0 else None
-        if isinstance(sample_value, (str, int, float, bool)) or sample_value is None:
-            if primary_key is None:
-                primary_key = col
-            columns.append((sanitize_sql_name(col), get_sqlite_type(sample_value)))
-        elif isinstance(sample_value, (dict, list)):
-            nested_tables.append((col, sample_value))
-
-    print(
-        f"Creating table: {table_name}, primary_key: {primary_key}, parent_table: {parent_table}, parent_key: {parent_key}"
-    )
-    create_table(
-        cursor, sanitize_sql_name(table_name), parent_table, parent_key, primary_key
-    )
-    update_table_schema(cursor, sanitize_sql_name(table_name), columns)
-
-    # Ensure all columns from the DataFrame are in the table
-    existing_columns = get_existing_columns(cursor, sanitize_sql_name(table_name))
-    for col in data.columns:
-        if sanitize_sql_name(col) not in existing_columns:
-            sample_value = data[col].iloc[0] if len(data) > 0 else None
-            col_type = get_sqlite_type(sample_value)
-            cursor.execute(
-                f"ALTER TABLE [{sanitize_sql_name(table_name)}] ADD COLUMN [{sanitize_sql_name(col)}] {col_type}"
-            )
-
-    for nested_col, nested_data in nested_tables:
-        nested_table_name = (
-            f"{sanitize_sql_name(table_name)}_{sanitize_sql_name(nested_col)}"
-        )
-        if isinstance(nested_data, dict):
-            nested_df = pd.DataFrame([nested_data])
-        elif isinstance(nested_data, list):
-            nested_df = pd.DataFrame(nested_data)
-        else:
-            continue
-        # Ensure the nested table is created before getting its primary key
-        create_table(cursor, nested_table_name)
-        nested_primary_key = get_primary_key(cursor, nested_table_name)
-        create_tables_for_nested_data(
-            cursor,
-            nested_table_name,
-            nested_df,
-            sanitize_sql_name(table_name),
-            nested_primary_key[0] if nested_primary_key else f"{table_name}_id",
-        )
-
-
-def create_table(
-    cursor: sqlite3.Cursor,
-    table_name: str,
-    parent_table: Optional[str] = None,
-    parent_key: Optional[str] = None,
-    primary_key: Optional[str] = None,
-):
-    if primary_key:
-        primary_key_def = f"[{primary_key}] INTEGER PRIMARY KEY"
-    else:
-        primary_key_def = "id INTEGER PRIMARY KEY AUTOINCREMENT"
-
-    columns = [primary_key_def, "call_id TEXT"]
-
-    if parent_table and parent_key:
-        columns.append(f"[{parent_key}] INTEGER")
-        columns.append(
-            f"FOREIGN KEY ([{parent_key}]) REFERENCES [{parent_table}]([{parent_key}])"
-        )
-
-    columns_def = ", ".join(columns)
-
-    cursor.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS [{table_name}] (
-            {columns_def},
-            UNIQUE(id)
-        )
-        """
-    )
+        if isinstance(sample_value, (dict, list)):
+            nested_table_name = f"{table_name}_{col}"
+            if isinstance(sample_value, dict):
+                nested_df = pd.DataFrame([sample_value])
+            elif isinstance(sample_value, list):
+                nested_df = pd.DataFrame(sample_value)
+            create_tables_for_nested_data(cursor, nested_table_name, nested_df)
 
 
 def insert_nested_data(
-    cursor: sqlite3.Cursor,
-    table_name: str,
-    data: pd.DataFrame,
-    call_id: str,
-    parent_key: Optional[str] = None,
-    parent_value: Optional[Any] = None,
-) -> None:
+    cursor: sqlite3.Cursor, table_name: str, data: pd.DataFrame, call_id: str
+):
     for _, row in data.iterrows():
-        columns = ["call_id"] + ([parent_key] if parent_value is not None else [])
-        values = [call_id] + ([parent_value] if parent_value is not None else [])
-
-        for col, value in row.items():
-            if isinstance(value, (str, int, float, bool)) or value is None:
-                columns.append(sanitize_sql_name(col))
-                values.append(value)
-
-        print("columns", columns)
-        print("values", values)
-
+        columns = list(row.index) + ["call_id"]
+        values = list(row.values) + [call_id]
         placeholders = ", ".join(["?" for _ in columns])
-        insert_query = f"INSERT OR REPLACE INTO [{sanitize_sql_name(table_name)}] ({', '.join(columns)}) VALUES ({placeholders})"
-        try:
-            cursor.execute(insert_query, values)
-        except sqlite3.IntegrityError as e:
-            print(f"Warning: {e}. Attempting to update existing row.")
-            update_columns = [f"{col} = ?" for col in columns if col != "id"]
-            update_values = [
-                value for col, value in zip(columns, values) if col != "id"
-            ]
-            update_query = f"UPDATE [{sanitize_sql_name(table_name)}] SET {', '.join(update_columns)} WHERE id = ?"
-            cursor.execute(update_query, update_values + [row["id"]])
 
-        # Get the rowid of the inserted or updated row
-        cursor.execute("SELECT last_insert_rowid()")
-        rowid = cursor.fetchone()[0]
+        insert_query = f"INSERT OR REPLACE INTO [{table_name}] ({', '.join(columns)}) VALUES ({placeholders})"
+        cursor.execute(insert_query, values)
 
-        for col, value in row.items():
-            if isinstance(value, (dict, list)):
-                nested_table_name = (
-                    f"{sanitize_sql_name(table_name)}_{sanitize_sql_name(col)}"
-                )
-                if isinstance(value, dict):
-                    nested_df = pd.DataFrame([value])
-                elif isinstance(value, list):
-                    nested_df = pd.DataFrame(value)
-                else:
-                    continue
-                # Get the primary key of the nested table
-                nested_primary_key = get_primary_key(cursor, nested_table_name)
-                insert_nested_data(
-                    cursor,
-                    nested_table_name,
-                    nested_df,
-                    call_id,
-                    (
-                        nested_primary_key[0]
-                        if nested_primary_key
-                        else f"{table_name}_id"
-                    ),  # Use table name as prefix for consistency
-                    rowid,
-                )
+    for col in data.columns:
+        sample_value = data[col].iloc[0] if len(data) > 0 else None
+        if isinstance(sample_value, (dict, list)):
+            nested_table_name = f"{table_name}_{col}"
+            if isinstance(sample_value, dict):
+                nested_df = pd.DataFrame([row[col] for _, row in data.iterrows()])
+            elif isinstance(sample_value, list):
+                nested_df = pd.DataFrame([item for row in data[col] for item in row])
+            insert_nested_data(cursor, nested_table_name, nested_df, call_id)
