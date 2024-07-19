@@ -49,8 +49,8 @@ def get_cached_result(
     columns = [description[0] for description in cursor.description]
     df = pd.DataFrame(rows, columns=columns)
 
-    # Remove the 'id' and 'call_id' columns
-    df = df.drop(columns=["id", "call_id"], errors="ignore")
+    # Remove the 'call_id' column, but keep the 'id' column
+    df = df.drop(columns=["call_id"], errors="ignore")
 
     # Reconstruct nested data
     df = reconstruct_nested_data(cursor, table_name, df)
@@ -368,6 +368,10 @@ def cache_result(
     cursor: sqlite3.Cursor, table_name: str, call_id: str, result: pd.DataFrame
 ) -> None:
     """Cache the result in the database."""
+    # Ensure 'id' column is present
+    if "id" not in result.columns:
+        result["id"] = range(len(result))
+
     # Get the column types for the new data
     new_columns = [
         (str(col), infer_sqlite_type(dtype)) for col, dtype in result.dtypes.items()

@@ -126,8 +126,8 @@ def query_table(
         columns = [col[0] for col in cursor.description]
         rows = cursor.fetchall()
 
-    df = pd.DataFrame(rows, columns=columns)
-    df = reconstruct_nested_data(cursor, table_name, df)
+        df = pd.DataFrame(rows, columns=columns)
+        df = reconstruct_nested_data(cursor, table_name, df)
 
     if output_format == "dataframe":
         return df
