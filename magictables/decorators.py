@@ -30,7 +30,11 @@ from magictables.database import (
 )
 from magictables.utils import call_ai_model, generate_ai_descriptions
 
+import pandas as pd
+from typing import Any, Callable, Dict, List, TypeVar, Generic
+
 T = TypeVar("T", bound=Callable[..., Any])
+
 RowType = TypeVar("RowType")
 
 
@@ -41,6 +45,20 @@ class MagicDataFrame(pd.DataFrame, Generic[RowType]):
     @property
     def _constructor(self):
         return MagicDataFrame
+
+    def __getstate__(self):
+        # Get the parent's __dict__ and remove the axis attributes
+        state = super().__getstate__()
+        for attr in self._internal_names:
+            if attr in state:
+                del state[attr]
+        return state
+
+    def __setstate__(self, state):
+        super().__setstate__(state)
+
+    def to_dict(self, orient="records"):
+        return super().to_dict(orient=orient)
 
     def transform(
         self, func: Callable[[pd.DataFrame], pd.DataFrame]
@@ -73,8 +91,20 @@ class MagicDataFrame(pd.DataFrame, Generic[RowType]):
 
 def generate_call_id(func: Callable, *args: Any, **kwargs: Any) -> str:
     """Generate a unique ID for a function call."""
+
+    def serialize(obj):
+        if isinstance(obj, MagicDataFrame):
+            return obj.to_dict("records")
+        elif isinstance(obj, pd.DataFrame):
+            return obj.to_dict("records")
+        raise TypeError(
+            f"Object of type {obj.__class__.__name__} is not JSON serializable"
+        )
+
     call_data = (func.__name__, args, kwargs)
-    return hashlib.md5(json.dumps(call_data, sort_keys=True).encode()).hexdigest()
+    return hashlib.md5(
+        json.dumps(call_data, sort_keys=True, default=serialize).encode()
+    ).hexdigest()
 
 
 def ensure_dataframe(result: Any) -> MagicDataFrame:

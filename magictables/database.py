@@ -302,6 +302,9 @@ def create_tables_for_nested_data(
     ]
     create_table(cursor, table_name, columns)
 
+    # Get the primary keys for the table
+    primary_keys = get_primary_key(cursor, table_name)
+
     for col in data.columns:
         if col in ["id", "call_id"]:
             continue
@@ -324,14 +327,23 @@ def create_tables_for_nested_data(
                 create_tables_for_nested_data(cursor, nested_table_name, nested_df)
 
                 # Create a foreign key relationship
-                cursor.execute(
-                    f"""
-                    CREATE TABLE IF NOT EXISTS [{nested_table_name}] (
-                        [{parent_id_col}] INTEGER,
-                        FOREIGN KEY ([{parent_id_col}]) REFERENCES [{table_name}]([{primary_keys[0]}])
+                if primary_keys:
+                    cursor.execute(
+                        f"""
+                        CREATE TABLE IF NOT EXISTS [{nested_table_name}] (
+                            [{parent_id_col}] {infer_sqlite_type(data[primary_keys[0]].dtype)},
+                            FOREIGN KEY ([{parent_id_col}]) REFERENCES [{table_name}]([{primary_keys[0]}])
+                        )
+                    """
                     )
-                """
-                )
+                else:
+                    cursor.execute(
+                        f"""
+                        CREATE TABLE IF NOT EXISTS [{nested_table_name}] (
+                            [{parent_id_col}] INTEGER
+                        )
+                    """
+                    )
 
 
 def create_table(
