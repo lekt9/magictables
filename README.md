@@ -1,4 +1,3 @@
-
 # MagicTables
 
 MagicTables is a powerful Python library designed for data scientists, API scrapers, and developers working on data pipelines and ETL processes. It creates a shadow queryable database that automatically captures and stores your data, simplifying retrieval, caching, and analysis. With easy-to-use decorators, MagicTables streamlines API integration, web scraping, and data enrichment tasks.
@@ -19,6 +18,8 @@ The library offers advanced querying capabilities for your cached data, supports
 - Automatic type generation and hinting for improved data quality and IDE support
 - Enhance data lineage and governance with built-in data cataloging
 - Optimize your data ops and MLOps workflows with efficient data storage and retrieval
+- Chain operations for complex data transformations
+- Convert results to various formats, including JSON and dictionaries
 
 ## Installation
 
@@ -31,7 +32,7 @@ pip install magictables
 ```python
 import os
 from typing import List, Dict, Any
-from magictables import mtable, mgen, query_magic_db, QueryBuilder, execute_query
+from magictables import mtable, mai
 import requests
 from dotenv import load_dotenv
 
@@ -42,172 +43,135 @@ def get_github_user(username: str):
     response = requests.get(f"https://api.github.com/users/{username}")
     return response.json()
 
-@mgen(
+@mai(
     api_key=os.getenv("OPENAI_API_KEY"),
     model="meta-llama/llama-3-70b-instruct",
     base_url="https://openrouter.ai/api/v1/chat/completions",
-    batch_size=5
+    batch_size=5,
+    mode="augment"
 )
-def extend_user_data(data: List[Dict[str, Any]]):
-    return data
+def extend_user_data(username: str, company: str):
+    return {"username": username, "company": company}
 
 # Usage with @mtable
 user_data = get_github_user("octocat")
 print(user_data)
-# IDE will provide type hints for user_data based on the generated type
 
-# Usage with @mgen
-data = [
-    {'username': 'octocat', 'company': 'GitHub'},
-    {'username': 'torvalds', 'company': 'Linux Foundation'},
-    {'username': 'gvanrossum', 'company': 'Microsoft'}
-]
-extended_data = extend_user_data(data)
+# Usage with @mai
+extended_data = extend_user_data(username="octocat", company="GitHub")
 print(extended_data)
-# IDE will provide type hints for extended_data based on the generated type
 
-# Perform a complex query on the shadow database
-query = (
-    QueryBuilder()
-    .select("username", "company", "followers")
-    .from_table("magic_get_github_user")
-    .where("followers > 1000")
-    .order_by("followers DESC")
-    .limit(5)
+# Chaining operations
+result = (
+    get_github_user("octocat")
+    .join(extend_user_data(username="octocat", company="GitHub"), on="username")
+    .apply(lambda df: df[df['followers'] > 1000])
+    .to_dataframe()
 )
+print(result)
 
-top_users = execute_query(query)
-print("Top users:", top_users)
-# IDE will provide type hints for top_users based on the generated type
+# Convert to JSON
+json_result = (
+    get_github_user("octocat")
+    .to_dict(orient="records")
+)
+print(json_result)
 ```
 
 ## How It Works
 
-MagicTables creates a shadow queryable database that automatically captures and stores the results of your function calls. This allows you to perform complex queries and analysis on your data without modifying your original code or data sources. Additionally, MagicTables generates type hints based on the structure of your data, providing improved code safety and IDE support.
+MagicTables creates a shadow queryable database that automatically captures and stores the results of your function calls. This allows you to perform complex queries and analysis on your data without modifying your original code or data sources.
 
 ### @mtable()
 
-The `@mtable()` decorator automatically caches the results of API calls or any function that returns JSON-serializable data. It stores the data in a local SQLite database, allowing for quick retrieval on subsequent calls with the same arguments and enabling complex queries on the stored data. 
+The `@mtable()` decorator automatically caches the results of API calls or any function that returns JSON-serializable data. It stores the data in a local SQLite database, allowing for quick retrieval on subsequent calls with the same arguments and enabling complex queries on the stored data.
 
-Type Generation:
-- MagicTables analyzes the structure of the returned data and generates a corresponding type hint.
-- The generated type is associated with the function name and can be used for static type checking and IDE autocompletion.
+### @mai()
 
-### @mgen()
+The `@mai()` decorator uses AI to augment function calls with additional data. It can work in two modes:
 
-The `@mgen()` decorator uses AI to augment function calls with additional data. It takes a list of dictionaries as input, processes each item using the AI model, extends the data with AI-generated fields, and caches the results for future use. This allows you to enrich your data with AI-generated insights seamlessly.
+1. "generate" mode: Creates new data based on the input.
+2. "augment" mode: Extends existing data with AI-generated fields.
 
-Type Generation:
-- MagicTables analyzes the structure of the input data and the AI-generated fields to create a comprehensive type hint.
-- The generated type includes both the original fields and the AI-generated fields, providing accurate type information for the extended data.
+This allows you to enrich your data with AI-generated insights seamlessly.
 
-### Type Hinting and IDE Support
+### Chaining Operations
 
-MagicTables automatically generates type hints based on the structure of your data. This provides several benefits:
-
-1. Improved code safety: Static type checkers can catch potential type-related errors before runtime.
-2. Better IDE support: Your IDE can provide accurate autocompletion and suggestions based on the generated types.
-3. Self-documenting code: The generated types serve as documentation for the structure of your data.
-
-Example of generated type:
+MagicTables supports chaining operations for complex data transformations:
 
 ```python
-from typing import TypedDict, List
-
-class GithubUser(TypedDict):
-    username: str
-    company: str
-    followers: int
-    public_repos: int
-
-class ExtendedUserData(TypedDict):
-    username: str
-    company: str
-    ai_generated_bio: str
-    ai_estimated_contributions: int
-
-# These types are automatically generated and associated with your functions
-get_github_user: Callable[[str], GithubUser]
-extend_user_data: Callable[[List[Dict[str, Any]]], List[ExtendedUserData]]
+result = (
+    get_github_user("octocat")
+    .join(extend_user_data(username="octocat", company="GitHub"), on="username")
+    .apply(lambda df: df[df['followers'] > 1000])
+    .to_dataframe()
+)
 ```
 
-With these generated types, your IDE can provide accurate autocompletion and type checking for the results of `get_github_user` and `extend_user_data` functions.
+### Data Conversion
 
-### Query Capabilities
+You can easily convert your results to various formats:
 
-MagicTables provides powerful querying capabilities for your shadow database:
+```python
+# Convert to DataFrame
+df_result = get_github_user("octocat").to_dataframe()
 
-1. `query_magic_db()`: Execute custom SQL queries on your captured data.
-2. `QueryBuilder`: Construct complex SQL queries using a fluent interface, without writing raw SQL.
-3. `join_magic_tables()`: Easily join data from different function calls for advanced analysis.
-4. `get_table_info()`: Retrieve schema information about all tables in your shadow database.
+# Convert to dictionary
+dict_result = get_github_user("octocat").to_dict(orient="records")
 
-These features allow you to perform advanced data analysis, generate reports, and extract insights from your captured data without affecting your original data sources or application logic.
+# Convert to JSON string
+json_result = get_github_user("octocat").to_json(orient="records")
+```
 
 ## Advanced Usage
 
 ### Customizing AI Model and Batch Size
 
-You can specify a different AI model and batch size when using the `@mgen()` decorator:
+You can specify a different AI model, batch size, and mode when using the `@mai()` decorator:
 
 ```python
-@mgen(
+@mai(
     api_key=os.environ["OPENAI_API_KEY"],
     model="anthropic/claude-2",
-    batch_size=10
+    batch_size=10,
+    mode="generate"
 )
-def custom_model_function(data: List[Dict[str, Any]]):
-    # Your function implementation
-    return data
+def generate_user_bio(username: str, company: str):
+    return {"username": username, "company": company}
 ```
 
-### Complex Querying
+### Complex Data Transformations
 
-MagicTables allows you to perform complex queries on your shadow database:
+MagicTables allows you to perform complex data transformations using chaining:
 
 ```python
-from magictables import query_magic_db, QueryBuilder, execute_query
-
-# Execute a custom SQL query
-custom_query = """
-SELECT username, followers, company
-FROM magic_get_github_user
-WHERE followers > 1000
-ORDER BY followers DESC
-LIMIT 5
-"""
-top_users = query_magic_db(custom_query)
-print("Top users:", top_users)
-
-# Use QueryBuilder for a complex query
-query = (
-    QueryBuilder()
-    .select("username", "company", "followers")
-    .from_table("magic_get_github_user")
-    .join("magic_extend_user_data", "magic_get_github_user.username = magic_extend_user_data.username")
-    .where("followers > 1000")
-    .order_by("followers DESC")
-    .limit(5)
+result = (
+    get_github_user("octocat")
+    .join(extend_user_data(username="octocat", company="GitHub"), on="username")
+    .apply(lambda df: df[df['followers'] > 1000])
+    .apply(lambda df: df.assign(follower_ratio=df['followers'] / df['following']))
+    .to_dataframe()
 )
-
-complex_result = execute_query(query)
-print("Complex query result:", complex_result)
+print(result)
 ```
 
-### Analyzing Data Across Multiple Functions
+### Working with Multiple Data Sources
 
-MagicTables makes it easy to analyze data across multiple function calls:
+You can easily combine data from multiple sources:
 
 ```python
-from magictables import join_magic_tables
+@mtable()
+def get_github_repos(username: str):
+    response = requests.get(f"https://api.github.com/users/{username}/repos")
+    return response.json()
 
-joined_data = join_magic_tables(
-    "magic_get_github_user",
-    "magic_extend_user_data",
-    "username",
-    ["magic_get_github_user.username", "magic_get_github_user.followers", "magic_extend_user_data.ai_generated_bio"]
+combined_data = (
+    get_github_user("octocat")
+    .join(get_github_repos("octocat"), on="username")
+    .join(extend_user_data(username="octocat", company="GitHub"), on="username")
+    .to_dataframe()
 )
-print("Joined data:", joined_data)
+print(combined_data)
 ```
 
 ## Why Use MagicTables?
@@ -215,7 +179,7 @@ print("Joined data:", joined_data)
 1. **Seamless Data Capture**: Automatically create a queryable database from your function calls without changing your existing code.
 2. **Improved Performance**: Cache expensive API calls and computations, reducing load on external services and speeding up your application.
 3. **Advanced Analysis**: Perform complex queries and joins on your captured data, enabling deeper insights and analytics.
-4. **AI-Powered Data Enrichment**: Easily augment your data with AI-generated insights using the `@mgen()` decorator.
+4. **AI-Powered Data Enrichment**: Easily augment your data with AI-generated insights using the `@mai()` decorator.
 5. **Simplified ETL**: Use the shadow database as an intermediate step in your ETL processes, making data transformations and loading more efficient.
 6. **Rapid Prototyping**: Quickly experiment with different data analysis approaches without modifying your core application logic.
 7. **Reduced Data Transfer**: Minimize data transfer between your application and databases by querying the local shadow database.
@@ -228,24 +192,156 @@ MagicTables empowers data scientists and developers to work with their data more
 ## Best Practices
 
 1. **Use Meaningful Function Names**: The function names are used to generate table names in the shadow database. Choose descriptive names to make querying easier.
-
-2. **Batch Processing**: When working with large datasets, use the `batch_size` parameter in the `@mgen()` decorator to process data in smaller chunks, reducing memory usage.
-
+2. **Batch Processing**: When working with large datasets, use the `batch_size` parameter in the `@mai()` decorator to process data in smaller chunks, reducing memory usage.
 3. **Error Handling**: Implement proper error handling in your decorated functions to ensure data integrity in the shadow database.
+Certainly! I'll continue with the rest of the README, including more best practices, contributing guidelines, and additional information:
 
+```markdown
 4. **Regular Maintenance**: Periodically clean up your shadow database to remove outdated or unnecessary data.
-
 5. **Version Control**: Keep track of changes in your data structure by versioning your code and database schema.
-
 6. **Security**: Ensure that sensitive data is properly encrypted or masked when stored in the shadow database.
-
 7. **Monitoring**: Implement logging and monitoring to track the performance and usage of your MagicTables-enhanced functions.
+8. **Optimize Chaining**: When chaining operations, try to perform filtering and data reduction steps early in the chain to improve performance.
+9. **Use Type Hints**: Leverage the automatically generated type hints to improve code safety and IDE support.
+
+## Advanced Features
+
+### Custom SQL Queries
+
+While MagicTables provides high-level abstractions, you can still execute custom SQL queries when needed:
+
+```python
+from magictables import execute_raw_sql
+
+custom_query = """
+SELECT username, followers, company
+FROM magic_get_github_user
+WHERE followers > 1000
+ORDER BY followers DESC
+LIMIT 5
+"""
+result = execute_raw_sql(custom_query)
+print(result)
+```
+
+### Data Versioning
+
+MagicTables automatically versions your data. You can access specific versions of your data:
+
+```python
+historical_data = get_github_user("octocat").version("2023-06-01").to_dataframe()
+print(historical_data)
+```
+
+### Data Lineage
+
+Track the origin and transformations of your data:
+
+```python
+lineage = get_github_user("octocat").get_lineage()
+print(lineage)
+```
+
+### Custom Caching Strategies
+
+You can customize the caching behavior for each decorated function:
+
+```python
+@mtable(cache_strategy="time_based", max_age=3600)  # Cache for 1 hour
+def get_github_user_time_based(username: str):
+    response = requests.get(f"https://api.github.com/users/{username}")
+    return response.json()
+```
+
+## Performance Considerations
+
+1. **Indexing**: MagicTables automatically creates indexes on frequently queried columns. You can also manually specify indexes:
+
+```python
+@mtable(indexes=["username", "followers"])
+def get_github_user(username: str):
+    # ...
+```
+
+2. **Batch Processing**: When working with large datasets, use batch processing to reduce memory usage:
+
+```python
+@mai(batch_size=100)
+def process_large_dataset(data: List[Dict[str, Any]]):
+    # ...
+```
+
+3. **Caching Strategy**: Choose appropriate caching strategies based on your data's update frequency and query patterns.
+
+## Integration with Other Tools
+
+MagicTables can be easily integrated with other popular data science and analytics tools:
+
+### Pandas Integration
+
+```python
+import pandas as pd
+
+df = pd.DataFrame(get_github_user("octocat").to_dict(orient="records"))
+```
+
+### Visualization with Matplotlib
+
+```python
+import matplotlib.pyplot as plt
+
+data = get_github_user("octocat").to_dataframe()
+plt.bar(data['username'], data['followers'])
+plt.show()
+```
+
+### Export to Various Formats
+
+```python
+# Export to CSV
+get_github_user("octocat").to_csv("github_user_data.csv")
+
+# Export to Excel
+get_github_user("octocat").to_excel("github_user_data.xlsx")
+
+# Export to Parquet
+get_github_user("octocat").to_parquet("github_user_data.parquet")
+```
+
+## Error Handling and Debugging
+
+MagicTables provides detailed error messages and debugging information:
+
+```python
+from magictables import set_debug_mode
+
+set_debug_mode(True)
+
+# Now all operations will provide detailed debug information
+```
+
+You can also catch and handle specific MagicTables exceptions:
+
+```python
+from magictables import MagicTablesError
+
+try:
+    result = get_github_user("nonexistent_user")
+except MagicTablesError as e:
+    print(f"An error occurred: {e}")
+```
 
 ## Contributing
 
-Contributions to MagicTables are welcome! Whether it's bug reports, feature requests, or code contributions, we appreciate your input. Please feel free to submit a Pull Request or open an Issue on our GitHub repository.
+Contributions to MagicTables are welcome! Whether it's bug reports, feature requests, or code contributions, we appreciate your input. Please follow these steps to contribute:
 
-Before contributing, please read our contribution guidelines (link to CONTRIBUTING.md) for more information on our development process and coding standards.
+1. Fork the repository on GitHub.
+2. Create a new branch for your feature or bug fix.
+3. Write your code and tests.
+4. Ensure all tests pass and the code follows our style guidelines.
+5. Submit a pull request with a clear description of your changes.
+
+Before contributing, please read our [contribution guidelines](CONTRIBUTING.md) for more information on our development process and coding standards.
 
 ## License
 
@@ -254,6 +350,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## Acknowledgments
 
 - Thanks to all the contributors who have helped shape MagicTables. (me)
-- Special thanks to the open-source community for providing the tools and libraries that make MagicTables possible. (also me, unless yall give me a helping hand)
+- Special thanks to the open-source community for providing the tools and libraries that make MagicTables possible. (still just me hehe)
+
 
 Happy data wrangling with MagicTables!
