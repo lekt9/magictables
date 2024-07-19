@@ -13,6 +13,7 @@ from magictables.database import (
     create_tables_for_nested_data,
     get_cached_result,
     get_connection,
+    infer_sqlite_type,
     insert_nested_data,
     sanitize_sql_name,
 )
@@ -59,6 +60,11 @@ def mtable() -> Callable[[Callable[..., Any]], Callable[..., pd.DataFrame]]:
                     return pd.DataFrame()
 
                 result_df = ensure_dataframe(result)
+                columns = [
+                    (str(col), infer_sqlite_type(dtype))
+                    for col, dtype in result_df.dtypes.items()
+                ]
+                create_table(cursor, table_name, columns)
                 cache_result(cursor, table_name, call_id, result_df)
                 conn.commit()
                 update_generated_types(conn)
@@ -83,7 +89,11 @@ def mai(
             table_name = f"ai_{func.__name__}"
 
             with get_connection() as (conn, cursor):
-                create_table(cursor, table_name)
+                columns = [
+                    (str(col), infer_sqlite_type(dtype))
+                    for col, dtype in result_df.dtypes.items()
+                ]
+                create_table(cursor, table_name, columns)
                 ai_results = process_batches(cursor, table_name, data, batch_size)
                 conn.commit()
 
