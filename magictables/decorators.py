@@ -135,24 +135,29 @@ def mtable(func: Optional[Callable] = None) -> Callable[[T], T]:
                     return MagicDataFrame(cached_result)
 
                 print(f"Cache miss for {f.__name__}")
-                result = f(*args, **kwargs)
-                result_df = ensure_dataframe(result)
-                columns = [
-                    (str(col), infer_sqlite_type(dtype))
-                    for col, dtype in result_df.dtypes.items()
-                ]
-                create_table(cursor, table_name, columns)
-                cache_result(cursor, table_name, call_id, result_df)
-                conn.commit()
+                try:
+                    result = f(*args, **kwargs)
+                    result_df = ensure_dataframe(result)
+                    columns = [
+                        (str(col), infer_sqlite_type(dtype))
+                        for col, dtype in result_df.dtypes.items()
+                    ]
+                    create_table(cursor, table_name, columns)
+                    cache_result(cursor, table_name, call_id, result_df)
+                    conn.commit()
 
-                update_generated_types(conn)
-                type_hints = get_type_hints_for_table(conn, table_name)
-                RowType = create_typed_dict(
-                    f"{f.__name__}Row", {k: eval(v) for k, v in type_hints.items()}
-                )
-                wrapper.__annotations__["return"] = MagicDataFrame[List[RowType]]
+                    update_generated_types(conn)
+                    type_hints = get_type_hints_for_table(conn, table_name)
+                    RowType = create_typed_dict(
+                        f"{f.__name__}Row", {k: eval(v) for k, v in type_hints.items()}
+                    )
+                    wrapper.__annotations__["return"] = MagicDataFrame[List[RowType]]
 
-            return result_df
+                    return result_df
+                except Exception as e:
+                    print(f"Error in {f.__name__}: {str(e)}")
+                    conn.rollback()  # Rollback any changes made to the database
+                    raise  # Re-raise the exception to be handled by the caller
 
         return cast(T, wrapper)
 
@@ -163,46 +168,52 @@ def mai(batch_size: int = 10, mode: str = "generate") -> Callable[[T], T]:
     def decorator(func: T) -> T:
         @functools.wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> MagicDataFrame:
-            result = func(*args, **kwargs)
-            result_df = ensure_dataframe(result)
-            data = result_df.to_dict("records")
+            try:
+                result = func(*args, **kwargs)
+                result_df = ensure_dataframe(result)
+                data = result_df.to_dict("records")
 
-            table_name = f"ai_{func.__name__}"
+                table_name = f"ai_{func.__name__}"
 
-            with get_connection() as (conn, cursor):
-                columns = [
-                    (str(col), infer_sqlite_type(dtype))
-                    for col, dtype in result_df.dtypes.items()
-                ]
-                create_table(cursor, table_name, columns)
-                ai_results = process_batches(cursor, table_name, data, batch_size)
-                result_df = combine_results(result_df, ai_results, mode)
+                with get_connection() as (conn, cursor):
+                    columns = [
+                        (str(col), infer_sqlite_type(dtype))
+                        for col, dtype in result_df.dtypes.items()
+                    ]
+                    create_table(cursor, table_name, columns)
+                    ai_results = process_batches(cursor, table_name, data, batch_size)
+                    result_df = combine_results(result_df, ai_results, mode)
 
-                # Update the table schema before caching the result
-                new_columns = [
-                    (str(col), infer_sqlite_type(dtype))
-                    for col, dtype in result_df.dtypes.items()
-                ]
-                update_table_schema(cursor, table_name, new_columns)
+                    # Update the table schema before caching the result
+                    new_columns = [
+                        (str(col), infer_sqlite_type(dtype))
+                        for col, dtype in result_df.dtypes.items()
+                    ]
+                    update_table_schema(cursor, table_name, new_columns)
 
-                cache_result(
-                    cursor,
-                    table_name,
-                    generate_call_id(func, *args, **kwargs),
-                    result_df,
-                )
-                conn.commit()
+                    cache_result(
+                        cursor,
+                        table_name,
+                        generate_call_id(func, *args, **kwargs),
+                        result_df,
+                    )
+                    conn.commit()
 
-                generate_ai_descriptions(table_name, result_df.columns.tolist())
+                    generate_ai_descriptions(table_name, result_df.columns.tolist())
 
-                update_generated_types(conn)
-                type_hints = get_type_hints_for_table(conn, table_name)
-                RowType = create_typed_dict(
-                    f"{func.__name__}Row", {k: eval(v) for k, v in type_hints.items()}
-                )
-                wrapper.__annotations__["return"] = MagicDataFrame[List[RowType]]
+                    update_generated_types(conn)
+                    type_hints = get_type_hints_for_table(conn, table_name)
+                    RowType = create_typed_dict(
+                        f"{func.__name__}Row",
+                        {k: eval(v) for k, v in type_hints.items()},
+                    )
+                    wrapper.__annotations__["return"] = MagicDataFrame[List[RowType]]
 
-            return MagicDataFrame(result_df)
+                return MagicDataFrame(result_df)
+            except Exception as e:
+                print(f"Error in {func.__name__}: {str(e)}")
+                # If an error occurs, we don't store anything in the database
+                raise  # Re-raise the exception to be handled by the caller
 
         return cast(T, wrapper)
 
