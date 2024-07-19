@@ -172,7 +172,7 @@ def mai(
                     ai_results = process_batches(
                         cursor, table_name, data, batch_size, query
                     )
-                    result_df = combine_results(result_df, ai_results, mode)
+                    result_df = combine_results(result_df, ai_results, mode, query)
 
                     # Update the table schema before caching the result
                     new_columns = [
@@ -180,6 +180,11 @@ def mai(
                         for col, dtype in result_df.dtypes.items()
                     ]
                     update_table_schema(cursor, table_name, new_columns)
+
+                    # Clear existing data for this call_id
+                    cursor.execute(
+                        f"DELETE FROM {table_name} WHERE call_id = ?", (call_id,)
+                    )
 
                     # Add call_id to the result_df before caching
                     result_df["call_id"] = call_id
@@ -212,6 +217,38 @@ def mai(
         return decorator(func)
 
 
+def combine_results(
+    original_df: MagicDataFrame,
+    ai_results: List[Dict[str, Any]],
+    mode: str,
+    query: Optional[str],
+) -> MagicDataFrame:
+    if mode == "generate":
+        # Add more rows
+        new_rows = pd.DataFrame(ai_results)
+        return MagicDataFrame(pd.concat([original_df, new_rows], ignore_index=True))
+    elif mode == "augment":
+        # Replace or add new columns based on AI results
+        result_df = original_df.copy()
+
+        # Ensure we have the same number of AI results as original rows
+        ai_results = ai_results[: len(result_df)]
+
+        for i, ai_result in enumerate(ai_results):
+            for key, value in ai_result.items():
+                if key in result_df.columns:
+                    # Replace existing data only if it's not None or NaN
+                    if value is not None and pd.notna(value):
+                        result_df.at[i, key] = value
+                else:
+                    # Add new column
+                    result_df.at[i, key] = value
+
+        return MagicDataFrame(result_df)
+    else:
+        raise ValueError("Invalid mode. Must be either 'generate' or 'augment'")
+
+
 def process_batches(
     cursor: sqlite3.Cursor,
     table_name: str,
@@ -237,29 +274,6 @@ def process_batches(
 
         ai_results.extend([cached_results[key] for key in keys])
     return ai_results
-
-
-def combine_results(
-    original_df: MagicDataFrame, ai_results: List[Dict[str, Any]], mode: str
-) -> MagicDataFrame:
-    if mode == "generate":
-        return MagicDataFrame(ai_results)
-    elif mode == "augment":
-        # Create a copy of the original DataFrame to avoid modifying it directly
-        result_df = original_df.copy()
-
-        # Iterate through the AI results and add them to the corresponding rows
-        for idx, ai_result in enumerate(ai_results):
-            if idx < len(result_df):
-                for key, value in ai_result.items():
-                    result_df.loc[idx, f"ai_{key}"] = value
-            else:
-                # If we have more AI results than rows, we stop augmenting
-                break
-
-        return MagicDataFrame(result_df)
-    else:
-        raise ValueError("Invalid mode. Must be either 'generate' or 'augment'")
 
 
 def update_generated_types(conn: sqlite3.Connection):

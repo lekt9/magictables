@@ -1,9 +1,10 @@
 import sqlite3
-from typing import List, Dict, Any
-from .database import MAGIC_DB, get_connection
+from typing import List, Dict, Any, Union
+import pandas as pd
+from .database import MAGIC_DB, get_connection, reconstruct_nested_data
 
 
-def query_magic_db(query: str, params: tuple = ()) -> List[Dict[str, Any]]:
+def execute_sql(query: str, params: tuple = ()) -> List[Dict[str, Any]]:
     """
     Execute a custom SQL query on the magic database.
 
@@ -36,27 +37,7 @@ def get_table_info() -> Dict[str, List[str]]:
     return table_info
 
 
-def join_magic_tables(
-    table1: str, table2: str, join_column: str, select_columns: List[str]
-) -> List[Dict[str, Any]]:
-    """
-    Perform a simple inner join between two tables in the magic database.
-
-    :param table1: Name of the first table
-    :param table2: Name of the second table
-    :param join_column: Column to join on (must exist in both tables)
-    :param select_columns: List of columns to select in the result
-    :return: List of dictionaries representing the join results
-    """
-    query = f"""
-    SELECT {', '.join(select_columns)}
-    FROM {table1}
-    INNER JOIN {table2} ON {table1}.{join_column} = {table2}.{join_column}
-    """
-    return query_magic_db(query)
-
-
-class QueryBuilder:
+class SQLQueryBuilder:
     def __init__(self):
         self.select_clause = []
         self.from_clause = ""
@@ -107,12 +88,54 @@ class QueryBuilder:
         return query
 
 
-def execute_query(query_builder: QueryBuilder) -> List[Dict[str, Any]]:
+def query_table(
+    table_name: str,
+    conditions: Dict[str, Any] = None,
+    limit: int = None,
+    order_by: List[str] = None,
+    output_format: str = "dataframe",
+) -> Union[pd.DataFrame, List[Dict[str, Any]], str]:
     """
-    Execute a query built with the QueryBuilder.
+    Query stored data from a specific table with optional conditions, limit, and ordering.
 
-    :param query_builder: QueryBuilder instance
-    :return: List of dictionaries representing the query results
+    :param table_name: Name of the table to query
+    :param conditions: Dictionary of column-value pairs for WHERE clause
+    :param limit: Maximum number of rows to return
+    :param order_by: List of columns to order by
+    :param output_format: Desired output format ('dataframe', 'dict', or 'json')
+    :return: Query results in the specified format
     """
-    query = query_builder.build()
-    return query_magic_db(query)
+    query = f"SELECT * FROM {table_name}"
+    params = []
+
+    if conditions:
+        where_clauses = []
+        for column, value in conditions.items():
+            where_clauses.append(f"{column} = ?")
+            params.append(value)
+        query += " WHERE " + " AND ".join(where_clauses)
+
+    if order_by:
+        query += f" ORDER BY {', '.join(order_by)}"
+
+    if limit:
+        query += f" LIMIT {limit}"
+
+    with get_connection() as (conn, cursor):
+        cursor.execute(query, params)
+        columns = [col[0] for col in cursor.description]
+        rows = cursor.fetchall()
+
+    df = pd.DataFrame(rows, columns=columns)
+    df = reconstruct_nested_data(cursor, table_name, df)
+
+    if output_format == "dataframe":
+        return df
+    elif output_format == "dict":
+        return df.to_dict("records")
+    elif output_format == "json":
+        return df.to_json(orient="records")
+    else:
+        raise ValueError(
+            "Invalid output format. Choose 'dataframe', 'dict', or 'json'."
+        )

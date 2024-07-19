@@ -1,19 +1,17 @@
 from .decorators import mtable, mai
 from .query import (
-    query_magic_db,
+    execute_sql,
     get_table_info,
-    join_magic_tables,
-    QueryBuilder,
-    execute_query,
+    SQLQueryBuilder,
+    query_table,
 )
 
 __all__ = [
     "mtable",
     "mai",
-    "query_magic_db",
+    "execute_sql",
     "get_table_info",
-    "join_magic_tables",
-    "QueryBuilder",
-    "execute_query",
+    "SQLQueryBuilder",
+    "query_table",
 ]
 __version__ = "0.2.0"

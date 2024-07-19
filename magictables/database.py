@@ -40,25 +40,22 @@ def get_cached_result(
     cursor: sqlite3.Cursor, table_name: str, call_id: str
 ) -> Optional[pd.DataFrame]:
     try:
-        cursor.execute(
-            f"SELECT * FROM [{sanitize_sql_name(table_name)}] WHERE call_id = ?",
-            (call_id,),
-        )
+        cursor.execute(f"SELECT * FROM {table_name} WHERE call_id = ?", (call_id,))
         rows = cursor.fetchall()
-        if rows:
-            columns = [description[0] for description in cursor.description]
-            df = pd.DataFrame(rows, columns=columns)
-            return reconstruct_nested_data(cursor, table_name, df)
-    except sqlite3.OperationalError as e:
-        if "no such table" in str(e):
+        if not rows:
             return None
-        else:
-            raise
-    return None
+    except:
+        return None
+    columns = [description[0] for description in cursor.description]
+    df = pd.DataFrame(rows, columns=columns)
 
+    # Remove the 'id' and 'call_id' columns
+    df = df.drop(columns=["id", "call_id"], errors="ignore")
 
-import pandas as pd
-import numpy as np
+    # Reconstruct nested data
+    df = reconstruct_nested_data(cursor, table_name, df)
+
+    return df
 
 
 def ensure_dataframe(result: Any) -> pd.DataFrame:
@@ -193,15 +190,9 @@ def get_primary_key(cursor: sqlite3.Cursor, table_name: str) -> Optional[List[st
             raise
 
     primary_keys = []
-    unique_columns = []
     for row in cursor.fetchall():
         if row[5]:  # Any non-zero value in the 6th column indicates a primary key
             primary_keys.append(row[1])  # Append the name of the primary key column
-        if row[3]:  # Any non-zero value in the 4th column indicates a unique column
-            unique_columns.append(row[1])  # Append the name of the unique column
-
-    if not primary_keys and unique_columns:
-        primary_keys = unique_columns
 
     return primary_keys if primary_keys else None
 
@@ -326,36 +317,51 @@ def create_tables_for_nested_data(
 
 
 def create_table(
-    cursor: sqlite3.Cursor,
-    table_name: str,
-    columns: List[Tuple[Union[str, Hashable], str]],
-):
-    # Determine the primary key
-    primary_keys = get_primary_key(cursor, table_name)
-    if primary_keys:
-        primary_key = ", ".join(f"[{pk}]" for pk in primary_keys)
-        id_definition = f"PRIMARY KEY ({primary_key})"
-    else:
-        primary_key = "id"
-        id_definition = "id INTEGER PRIMARY KEY AUTOINCREMENT"
-
-    column_defs = [
-        f"[{col}] {col_type}"
-        for col, col_type in columns
-        if primary_keys is None or col not in primary_keys
-    ]
-
-    # Add call_id if it's not already in the columns
-    if "call_id" not in [col for col, _ in columns]:
-        column_defs.append("call_id TEXT")
-
-    create_query = f"""
-    CREATE TABLE IF NOT EXISTS [{table_name}] (
-        {', '.join(column_defs)}
+    cursor: sqlite3.Cursor, table_name: str, columns: List[Tuple[str, str]]
+) -> None:
+    """Create a table if it doesn't exist, or update its schema if it does."""
+    # Check if the table already exists
+    cursor.execute(
+        f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table_name}'"
     )
-    """
+    table_exists = cursor.fetchone() is not None
 
-    cursor.execute(create_query)
+    if table_exists:
+        # Get existing columns
+        cursor.execute(f"PRAGMA table_info([{table_name}])")
+        existing_columns = set(row[1] for row in cursor.fetchall())
+
+        # Add any new columns
+        for col_name, col_type in columns:
+            if col_name not in existing_columns:
+                cursor.execute(
+                    f"ALTER TABLE [{table_name}] ADD COLUMN [{col_name}] {col_type}"
+                )
+    else:
+        # Create the table with the provided columns
+        columns_with_types = [
+            f"{sanitize_sql_name(col)} {dtype}" for col, dtype in columns
+        ]
+
+        # Add an auto-incrementing primary key column if 'id' does not exist
+        if not any(col.lower() == "id" for col, _ in columns):
+            columns_with_types.insert(0, "id INTEGER PRIMARY KEY AUTOINCREMENT")
+
+        # Add the call_id column if it doesn't exist
+        if "call_id" not in [col for col, _ in columns]:
+            columns_with_types.append("call_id TEXT")
+
+        query = f"""
+        CREATE TABLE IF NOT EXISTS {table_name} (
+            {', '.join(columns_with_types)}
+        )
+        """
+        cursor.execute(query)
+
+        # Create an index on the call_id column
+        cursor.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_{table_name}_call_id ON {table_name} (call_id)"
+        )
 
 
 def cache_result(
@@ -370,9 +376,25 @@ def cache_result(
     # Update the table schema if necessary
     update_table_schema(cursor, table_name, new_columns)
 
-    # Now proceed with inserting the data
-    create_tables_for_nested_data(cursor, table_name, result)
-    insert_nested_data(cursor, table_name, result, call_id)
+    # Delete existing rows for this call_id
+    cursor.execute(f"DELETE FROM {table_name} WHERE call_id = ?", (call_id,))
+
+    # Prepare the data for insertion
+    columns = result.columns.tolist()
+    if "call_id" not in columns:
+        columns.append("call_id")
+
+    placeholders = ", ".join(["?" for _ in columns])
+    insert_query = (
+        f"INSERT INTO {table_name} ({', '.join(columns)}) VALUES ({placeholders})"
+    )
+
+    # Insert the data
+    for _, row in result.iterrows():
+        values = row.tolist()
+        if "call_id" not in result.columns:
+            values.append(call_id)
+        cursor.execute(insert_query, values)
 
 
 def insert_nested_data(
