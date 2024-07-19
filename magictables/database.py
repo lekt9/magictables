@@ -40,6 +40,15 @@ def cache_result(
     cursor: sqlite3.Cursor, table_name: str, call_id: str, result: pd.DataFrame
 ) -> None:
     """Cache the result in the database."""
+    # Get the column types for the new data
+    new_columns = [
+        (str(col), infer_sqlite_type(dtype)) for col, dtype in result.dtypes.items()
+    ]
+
+    # Update the table schema if necessary
+    update_table_schema(cursor, table_name, new_columns)
+
+    # Now proceed with inserting the data
     create_tables_for_nested_data(cursor, table_name, result)
     insert_nested_data(cursor, table_name, result, call_id)
 
@@ -112,12 +121,12 @@ def infer_sqlite_type(dtype):
 
 
 def update_table_schema(
-    cursor: sqlite3.Cursor, table_name: str, columns: List[Tuple[str, str]]
+    cursor: sqlite3.Cursor, table_name: str, new_columns: List[Tuple[str, str]]
 ):
     existing_columns = set(
         row[1] for row in cursor.execute(f"PRAGMA table_info([{table_name}])")
     )
-    for col_name, col_type in columns:
+    for col_name, col_type in new_columns:
         if col_name not in existing_columns:
             cursor.execute(
                 f"ALTER TABLE [{table_name}] ADD COLUMN [{col_name}] {col_type}"
