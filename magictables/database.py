@@ -1,6 +1,6 @@
 import sqlite3
 from contextlib import contextmanager
-from typing import List
+from typing import List, Optional
 
 MAGIC_DB = "magic.db"
 
@@ -16,16 +16,20 @@ def get_connection():
         conn.close()
 
 
-def create_table(cursor, table_name: str, parent_table: str = None):
-    query = f"""
+def create_table(
+    cursor: sqlite3.Cursor, table_name: str, parent_table: Optional[str] = None
+):
+    cursor.execute(
+        f"""
     CREATE TABLE IF NOT EXISTS [{table_name}] (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        reference_id TEXT
+        call_id TEXT UNIQUE,
+        reference_id TEXT,
+        {f'{parent_table}_reference_id TEXT,' if parent_table else ''}
+        data TEXT
+    )
     """
-    if parent_table:
-        query += f",\n        {parent_table}_reference_id TEXT"
-    query += "\n    )"
-    cursor.execute(query)
+    )
 
 
 def update_table_schema(cursor, table_name: str, columns: List[tuple]):

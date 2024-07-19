@@ -3,18 +3,70 @@ import json
 import hashlib
 import logging
 import sqlite3
-import uuid
-
 import pandas as pd
+import requests
 from .database import get_connection, create_table, update_table_schema
-from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar, cast
 from .schema_generator import get_type_hint, update_generated_types
-from typing import Callable, TypeVar
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+    TypeVar,
+    cast,
+    Union,
+    Literal,
+    Hashable,
+)
 
 T = TypeVar("T")
 
 # Configure logging
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.CRITICAL)
+
+
+class ChainableMagicTable:
+    def __init__(self, data: Union[pd.DataFrame, List[Dict[str, Any]]]):
+        if isinstance(data, pd.DataFrame):
+            self.df = data
+        else:
+            self.df = pd.DataFrame(data)
+
+    def join(
+        self,
+        other: "ChainableMagicTable",
+        how: str = "inner",
+        on: Union[str, List[str]] = None,
+    ) -> "ChainableMagicTable":
+        self.df = self.df.merge(other.df, how=how, on=on)
+        return self
+
+    from pandas._typing import Axis
+
+    def concat(
+        self, other: "ChainableMagicTable", axis: Axis = 0
+    ) -> "ChainableMagicTable":
+        self.df = pd.concat([self.df, other.df], axis=axis)
+        return self
+
+    def apply(
+        self, func: Callable[[pd.DataFrame], pd.DataFrame]
+    ) -> "ChainableMagicTable":
+        self.df = func(self.df)
+        return self
+
+    def to_dataframe(self) -> pd.DataFrame:
+        return self.df
+
+    def to_dict(
+        self,
+        orient: Literal[
+            "dict", "list", "series", "split", "records", "index"
+        ] = "records",
+    ) -> Union[Dict[Hashable, Any], List[Dict[Hashable, Any]]]:
+        return self.df.to_dict(orient)
 
 
 def flatten_dict(d: Dict, parent_key: str = "", sep: str = "_") -> Dict:
@@ -75,11 +127,94 @@ def create_tables_for_nested_data(
     return columns, nested_tables
 
 
+def call_ai_model(
+    new_items: List[Dict[str, Any]], api_key: str, base_url: str, model: str
+) -> List[Dict[str, Any]]:
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+    }
+
+    results = []
+    for item in new_items:
+        prompt = (
+            f"You are the all knowing JSON generator. Given the function arguments, "
+            f"Create a JSON object that populates the missing, or incomplete columns for the function call."
+            f"The current keys are: {json.dumps(item)}\n, you MUST only use these keys in the JSON you respond."
+            f"Respond with it wrapped in ```json code block with a flat unnested JSON"
+        )
+
+        data = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": prompt,
+                }
+            ],
+            "response_format": {"type": "json_object"},
+        }
+
+        # Call OpenAI/OpenRouter API
+        response = requests.post(url=base_url, headers=headers, data=json.dumps(data))
+
+        if response.status_code != 200:
+            raise Exception(
+                f"OpenRouter API request failed with status code {response.status_code}: {response.text}"
+            )
+
+        response_json = response.json()
+        response_data = re.search(
+            r"```(?:json)?\s*([\s\S]*?)\s*```",
+            response_json["choices"][0]["message"]["content"],
+        )
+        if response_data:
+            response_data = json.loads(response_data.group(1).strip())
+        else:
+            raise ValueError("No JSON content found in the response")
+
+        results.append(response_data)
+
+    return results
+
+
+def cache_results(
+    cursor: sqlite3.Cursor,
+    table_name: str,
+    keys: List[str],
+    results: List[Dict[str, Any]],
+):
+    for key, result in zip(keys, results):
+        # Get existing columns
+        cursor.execute(f"PRAGMA table_info([{table_name}])")
+        existing_columns = set(row[1] for row in cursor.fetchall())
+
+        # Add new columns if necessary
+        for column in result.keys():
+            if column not in existing_columns and column not in ["id", "timestamp"]:
+                cursor.execute(f"ALTER TABLE [{table_name}] ADD COLUMN [{column}] TEXT")
+
+        # Prepare the data for insertion
+        columns = list(result.keys())
+        placeholders = ", ".join(["?" for _ in columns])
+        values = [
+            json.dumps(v) if isinstance(v, (dict, list)) else v for v in result.values()
+        ]
+
+        # Store the response in the cache
+        cursor.execute(
+            f"""
+            INSERT OR REPLACE INTO [{table_name}] (id, {', '.join(columns)})
+            VALUES (?, {placeholders})
+            """,
+            (key, *values),
+        )
+
+
 def insert_nested_data(
     cursor: sqlite3.Cursor,
     table_name: str,
     data: Dict[str, Any],
-    parent_reference_id: Optional[str] = None,
+    call_id: str,
     table_structure: Optional[
         Tuple[List[Tuple[str, str]], List[Tuple[str, Dict[str, Any]]]]
     ] = None,
@@ -87,30 +222,31 @@ def insert_nested_data(
     columns, nested_tables = table_structure if table_structure else ([], [])
 
     cursor.execute(f"PRAGMA table_info([{sanitize_sql_name(table_name)}])")
-    existing_columns = [row[1] for row in cursor.fetchall() if row[1] != "id"]
-    values = []
-    placeholders = []
+    existing_columns = [
+        row[1] for row in cursor.fetchall() if row[1] not in ["id", "call_id"]
+    ]
 
-    for col in existing_columns:
-        if col == "id":
-            continue
-        if col.endswith("_reference_id") and col != "reference_id":
-            values.append(parent_reference_id)
-        elif col in data:
-            values.append(data[col])
-        else:
-            values.append(None)
-        placeholders.append("?")
-    print("Values:", values)
-    # Use square brackets around column names
-    column_names = ", ".join(
-        f"[{sanitize_sql_name(col)}]" for col in existing_columns if col != "id"
+    # Check if entry already exists
+    cursor.execute(
+        f"SELECT * FROM [{sanitize_sql_name(table_name)}] WHERE call_id = ?", (call_id,)
     )
-    query = f"INSERT INTO [{sanitize_sql_name(table_name)}] ({column_names}) VALUES ({', '.join(placeholders)})"
-    print("Query:", query)
+    existing_entry = cursor.fetchone()
 
-    cursor.execute(query, values)
-    reference_id = str(cursor.lastrowid)
+    if existing_entry:
+        # Update existing entry
+        set_clause = ", ".join([f"[{col}] = ?" for col in existing_columns])
+        update_query = f"UPDATE [{sanitize_sql_name(table_name)}] SET {set_clause} WHERE call_id = ?"
+        values = [data.get(col, None) for col in existing_columns] + [call_id]
+        cursor.execute(update_query, values)
+    else:
+        # Insert new entry
+        columns = ["call_id"] + existing_columns
+        placeholders = ", ".join(["?" for _ in columns])
+        insert_query = f"INSERT INTO [{sanitize_sql_name(table_name)}] ({', '.join(columns)}) VALUES ({placeholders})"
+        values = [call_id] + [data.get(col, None) for col in existing_columns]
+        cursor.execute(insert_query, values)
+
+    reference_id = call_id
 
     for nested_key, _ in nested_tables:
         if nested_key in data:
@@ -118,78 +254,26 @@ def insert_nested_data(
                 f"{sanitize_sql_name(table_name)}_{sanitize_sql_name(nested_key)}"
             )
             for item in data[nested_key]:
-                insert_nested_data(cursor, nested_table_name, item, reference_id)
+                insert_nested_data(
+                    cursor, nested_table_name, item, f"{call_id}_{nested_key}"
+                )
 
     return reference_id
 
 
-def insert_item(
-    cursor,
-    table_name: str,
-    item: Dict,
-    parent_table_name: str,
-    parent_reference_id: str,
-) -> str:
-    # Get existing columns
-    cursor.execute(f"PRAGMA table_info([{table_name}])")
-    existing_columns = set(row[1] for row in cursor.fetchall())
-
-    # Prepare columns and values for insertion
-    columns = ["reference_id"]
-    values = [parent_reference_id]
-    for key, value in item.items():
-        if not isinstance(value, (dict, list)):
-            sanitized_key = sanitize_sql_name(key)
-            if sanitized_key not in existing_columns:
-                # Add new column if it doesn't exist
-                cursor.execute(
-                    f"ALTER TABLE [{table_name}] ADD COLUMN [{sanitized_key}]"
-                )
-                existing_columns.add(sanitized_key)
-            columns.append(sanitized_key)
-            values.append(value)
-
-    # Insert the data
-    placeholders = ", ".join(["?" for _ in columns])
-    column_names = ", ".join(f"[{col}]" for col in columns)
-    cursor.execute(
-        f"INSERT INTO [{table_name}] ({column_names}) VALUES ({placeholders})",
-        values,
-    )
-
-    return cursor.lastrowid
-
-
-def reconstruct_nested_data(
-    cursor, base_table_name: str, reference_id: str, parent_reference_id: str = None
-) -> Dict:
+def reconstruct_nested_data(cursor, base_table_name: str, call_id: str) -> Dict:
     result = {}
 
-    # Fetch the main table data
-    if parent_reference_id:
-        cursor.execute(
-            f"SELECT * FROM [{sanitize_sql_name(base_table_name)}] WHERE {sanitize_sql_name(base_table_name.rsplit('_', 1)[0])}_reference_id = ? AND reference_id = ?",
-            (parent_reference_id, reference_id),
-        )
-    else:
-        cursor.execute(
-            f"SELECT * FROM [{sanitize_sql_name(base_table_name)}] WHERE reference_id = ?",
-            (reference_id,),
-        )
+    cursor.execute(
+        f"SELECT * FROM [{sanitize_sql_name(base_table_name)}] WHERE call_id = ?",
+        (call_id,),
+    )
     row = cursor.fetchone()
     if not row:
         return result
 
     # Reconstruct the main table data
-    for idx, col in enumerate(cursor.description):
-        col_name = col[0]
-        if col_name not in [
-            "id",
-            "reference_id",
-            f"{sanitize_sql_name(base_table_name.rsplit('_', 1)[0])}_reference_id",
-            "local_id",
-        ]:
-            result[col_name] = row[idx]
+    result = json.loads(row[3])  # Assuming 'data' is the 4th column
 
     # Fetch and reconstruct nested data
     cursor.execute(
@@ -202,48 +286,15 @@ def reconstruct_nested_data(
             len(sanitize_sql_name(base_table_name)) + 1 :
         ]  # Remove base_table_name_ prefix
         cursor.execute(
-            f"SELECT * FROM [{nested_table}] WHERE {sanitize_sql_name(base_table_name)}_reference_id = ?",
-            (reference_id,),
+            f"SELECT * FROM [{nested_table}] WHERE call_id LIKE ?",
+            (f"{call_id}_%",),
         )
         nested_rows = cursor.fetchall()
 
         if nested_rows:
-            if len(nested_rows) > 1:  # It's a list
-                result[key] = []
-                for nested_row in nested_rows:
-                    nested_item = {}
-                    for idx, col in enumerate(cursor.description):
-                        col_name = col[0]
-                        if col_name not in [
-                            "id",
-                            "reference_id",
-                            f"{base_table_name}_reference_id",
-                            "local_id",
-                        ]:
-                            nested_item[col_name] = nested_row[idx]
-                    result[key].append(nested_item)
-            else:  # It's a single item
-                result[key] = {}
-                for idx, col in enumerate(cursor.description):
-                    col_name = col[0]
-                    if col_name not in [
-                        "id",
-                        "reference_id",
-                        f"{base_table_name}_reference_id",
-                        "local_id",
-                    ]:
-                        result[key][col_name] = nested_rows[0][idx]
-
-            # Recursively reconstruct deeper nested data
-            for nested_row in (
-                result[key] if isinstance(result[key], list) else [result[key]]
-            ):
-                nested_reference_id = nested_row.get("reference_id")
-                if nested_reference_id:
-                    nested_data = reconstruct_nested_data(
-                        cursor, nested_table, nested_reference_id, reference_id
-                    )
-                    nested_row.update(nested_data)
+            result[key] = [
+                json.loads(row[3]) for row in nested_rows
+            ]  # Assuming 'data' is the 4th column
 
     return result
 
@@ -269,10 +320,10 @@ def sanitize_sql_name(name):
     )
 
 
-def mtable() -> Callable[[Callable[..., T]], Callable[..., T]]:
+def mtable() -> Callable[[Callable[..., T]], Callable[..., ChainableMagicTable]]:
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
-        def wrapper(*args, **kwargs) -> Any:
+        def wrapper(*args, **kwargs) -> ChainableMagicTable:
             call_id = hashlib.md5(
                 json.dumps((func.__name__, args, kwargs), sort_keys=True).encode()
             ).hexdigest()
@@ -280,86 +331,70 @@ def mtable() -> Callable[[Callable[..., T]], Callable[..., T]]:
             base_table_name = sanitize_sql_name(f"magic_{func.__name__}")
 
             with get_connection() as (conn, cursor):
-                # Ensure the main table exists
                 create_table(cursor, base_table_name)
 
                 cursor.execute(
-                    f"SELECT * FROM [{base_table_name}] WHERE reference_id = ?",
+                    f"SELECT * FROM [{base_table_name}] WHERE call_id = ?",
                     (call_id,),
                 )
                 row = cursor.fetchone()
 
                 if row:
                     # Result found in cache
-                    result = reconstruct_nested_data(cursor, base_table_name, call_id)
+                    print(f"Cache hit for {func.__name__}")  # Debug print
+                    result = json.loads(row[3])  # Assuming 'data' is the 4th column
                 else:
-                    # Call the function
+                    # Cache miss, call the function
+                    print(f"Cache miss for {func.__name__}")  # Debug print
                     result = func(*args, **kwargs)
 
-                    if result is None or (
-                        isinstance(result, (dict, list)) and not result
-                    ):
-                        return result
+                    if result is not None:
+                        if isinstance(result, pd.DataFrame):
+                            return ChainableMagicTable(result)
+                        elif isinstance(result, list) and all(
+                            isinstance(item, dict) for item in result
+                        ):
+                            return ChainableMagicTable(result)
+                        elif isinstance(result, dict):
+                            return ChainableMagicTable([result])
+                        else:
+                            raise ValueError(
+                                f"Unsupported return type from {func.__name__}: {type(result)}"
+                            )
+                    else:
+                        raise ValueError(f"Function {func.__name__} returned None")
 
-                    # Create tables for nested data
-                    table_structure = create_tables_for_nested_data(
-                        cursor,
-                        base_table_name,
-                        result if isinstance(result, dict) else {"result": result},
-                    )
-
-                    # Insert nested data
-                    insert_nested_data(
-                        cursor,
-                        base_table_name,
-                        result if isinstance(result, dict) else {"result": result},
-                        call_id,
-                        table_structure,
-                    )
-
-                    conn.commit()
-
-                    # Update generated types
-                    update_generated_types(conn)
-
-                # Get the generated type hint
-                ResultType = get_type_hint(func.__name__)
-
-                # Convert results to the generated type if available
-                if ResultType is not None:
-                    result = cast(ResultType, result)
-
-                return result
+            return ChainableMagicTable(result)
 
         return wrapper
 
     return decorator
 
 
-InputT = TypeVar("InputT")
-OutputT = TypeVar("OutputT")
-
-
-def mgen(
+def mai(
     api_key: str,
     base_url: str = "https://openrouter.ai/api/v1/chat/completions",
     model: str = "mistralai/mistral-7b-instruct",
     batch_size: int = 10,
-) -> Callable[
-    [Callable[[List[InputT]], List[OutputT]]], Callable[[List[InputT]], List[OutputT]]
-]:
-    def decorator(
-        func: Callable[[List[InputT]], List[OutputT]]
-    ) -> Callable[[List[InputT]], List[OutputT]]:
+    mode: str = "generate",  # Can be "generate" or "augment"
+) -> Callable[[Callable[..., Any]], Callable[..., ChainableMagicTable]]:
+    def decorator(func: Callable[..., Any]) -> Callable[..., ChainableMagicTable]:
         @functools.wraps(func)
-        def wrapper(*args: Any, **kwargs: Any) -> List[OutputT]:
-            if len(args) > 0 and isinstance(args[0], List):
-                data = args[0]
-            elif "data" in kwargs and isinstance(kwargs["data"], List):
-                data = kwargs["data"]
+        def wrapper(*args: Any, **kwargs: Any) -> ChainableMagicTable:
+            # Call the original function
+            result = func(*args, **kwargs)
+
+            # Determine the input type and convert to a list of dicts if necessary
+            if isinstance(result, pd.DataFrame):
+                data = result.to_dict("records")
+                is_dataframe = True
+            elif isinstance(result, list):
+                data = result
+                is_dataframe = False
+                result = pd.DataFrame(result)  # Convert list to DataFrame
             else:
                 raise ValueError(
-                    "The first argument or 'data' keyword argument must be a List"
+                    "The decorated function must return either a pandas DataFrame or a List"
                 )
 
             table_name = f"ai_{func.__name__}"
@@ -367,173 +402,70 @@ def mgen(
             with get_connection() as (conn, cursor):
                 create_table(cursor, table_name)
 
-                # Process the data in batches
-                results = []
+                ai_results = []
                 for i in range(0, len(data), batch_size):
                     batch = data[i : i + batch_size]
-                    batch_dict = [
-                        item if isinstance(item, dict) else {"input": item}
+
+                    # Generate keys for each item in the batch
+                    keys = [
+                        hashlib.md5(
+                            json.dumps(item, sort_keys=True).encode()
+                        ).hexdigest()
                         for item in batch
                     ]
 
-                    # Generate keys for each item in the batch
-                    keys = [
-                        hashlib.md5(
-                            json.dumps(item, sort_keys=True).encode()
-                        ).hexdigest()
-                        for item in batch_dict
-                    ]
-
-                    # Check which items are already in the cache
-                    placeholders = ",".join(["?" for _ in keys])
-                    cursor.execute(
-                        f"SELECT id, response FROM [{table_name}] WHERE id IN ({placeholders})",
-                        keys,
+                    # Check cache and process uncached items
+                    cached_results, new_items, new_keys = check_cache_and_get_new_items(
+                        cursor, table_name, batch, keys
                     )
-                    cached_results = {
-                        row[0]: json.loads(row[1]) for row in cursor.fetchall()
-                    }
-
-                    # Process items not in the cache
-                    new_items = [
-                        item
-                        for item, key in zip(batch_dict, keys)
-                        if key not in cached_results
-                    ]
-                    new_keys = [key for key in keys if key not in cached_results]
 
                     if new_items:
-                        # Call the decorated function with the new items
-                        new_results = func(new_items, *args[1:], **kwargs)
-
-                        # Insert new results into the database
-                        for key, result in zip(new_keys, new_results):
-                            cursor.execute(
-                                f"INSERT INTO [{table_name}] (id, response) VALUES (?, ?)",
-                                (key, json.dumps(result)),
-                            )
-
-                        # Update the cached_results dictionary with new results
-                        cached_results.update(dict(zip(new_keys, new_results)))
-
-                    # Combine cached and new results in the original order
-                    batch_results = [cached_results[key] for key in keys]
-                    results.extend(batch_results)
-
-                conn.commit()
-
-                # Update generated types
-                update_generated_types(conn)
-
-            # Get the generated type hint
-            ResultType = get_type_hint(func.__name__)
-
-            # Convert results to the generated type if available
-            if ResultType is not None:
-                results = [cast(ResultType, result) for result in results]
-
-            return results
-
-        return wrapper
-
-    return decorator
-
-
-def augment(
-    api_key: str,
-    base_url: str = "https://openrouter.ai/api/v1/chat/completions",
-    model: str = "mistralai/mistral-7b-instruct",
-    batch_size: int = 10,
-) -> Callable[[Callable[..., pd.DataFrame]], Callable[..., pd.DataFrame]]:
-    def decorator(func: Callable[..., pd.DataFrame]) -> Callable[..., pd.DataFrame]:
-        @functools.wraps(func)
-        def wrapper(*args: Any, **kwargs: Any) -> pd.DataFrame:
-            # Call the original function
-            df = func(*args, **kwargs)
-
-            if not isinstance(df, pd.DataFrame):
-                raise ValueError(
-                    "The decorated function must return a pandas DataFrame"
-                )
-
-            table_name = f"ai_{func.__name__}"
-
-            with get_connection() as (conn, cursor):
-                create_table(cursor, table_name)
-
-                # Process the DataFrame in batches
-                for i in range(0, len(df), batch_size):
-                    batch = df.iloc[i : i + batch_size]
-                    batch_dict = batch.to_dict("records")
-
-                    # Generate keys for each item in the batch
-                    keys = [
-                        hashlib.md5(
-                            json.dumps(item, sort_keys=True).encode()
-                        ).hexdigest()
-                        for item in batch_dict
-                    ]
-
-                    # Check which items are already in the cache
-                    placeholders = ",".join(["?" for _ in keys])
-                    cursor.execute(
-                        f"SELECT id, response FROM [{table_name}] WHERE id IN ({placeholders})",
-                        keys,
-                    )
-                    cached_results = {
-                        row[0]: json.loads(row[1]) for row in cursor.fetchall()
-                    }
-
-                    # Process items not in the cache
-                    new_items = [
-                        item
-                        for item, key in zip(batch_dict, keys)
-                        if key not in cached_results
-                    ]
-                    new_keys = [key for key in keys if key not in cached_results]
-
-                    if new_items:
-                        # Call the AI model with the new items
+                        # Call AI model for new items
                         new_results = call_ai_model(new_items, api_key, base_url, model)
-
-                        # Insert new results into the database
-                        for key, result in zip(new_keys, new_results):
-                            cursor.execute(
-                                f"INSERT INTO [{table_name}] (id, response) VALUES (?, ?)",
-                                (key, json.dumps(result)),
-                            )
-
-                        # Update the cached_results dictionary with new results
+                        cache_results(cursor, table_name, new_keys, new_results)
                         cached_results.update(dict(zip(new_keys, new_results)))
 
-                    # Combine cached and new results in the original order
-                    batch_results = [cached_results[key] for key in keys]
-
-                    # Add AI-generated columns to the DataFrame
-                    for idx, result in enumerate(batch_results):
-                        for key, value in result.items():
-                            df.loc[i + idx, f"ai_{key}"] = value
+                    ai_results.extend([cached_results[key] for key in keys])
 
                 conn.commit()
-
-                # Update generated types
                 update_generated_types(conn)
 
-            # Get the generated type hint
-            ResultType = get_type_hint(func.__name__)
+            # Process the results based on the mode and input type
+            if mode == "generate":
+                final_result = ai_results
+            elif mode == "augment":
+                if is_dataframe:
+                    for idx, ai_result in enumerate(ai_results):
+                        for key, value in ai_result.items():
+                            result.loc[idx, f"ai_{key}"] = value
+                    final_result = result
+                else:
+                    final_result = [
+                        {**original, **ai_result}
+                        for original, ai_result in zip(data, ai_results)
+                    ]
+            else:
+                raise ValueError("Invalid mode. Must be either 'generate' or 'augment'")
 
-            # Convert results to the generated type if available
-            if ResultType is not None:
-                df = df.astype(
-                    {
-                        col: ResultType.__annotations__[col]
-                        for col in ResultType.__annotations__
-                        if col in df.columns
-                    }
-                )
-
-            return df
+            # Add type assertion here
+            if isinstance(final_result, pd.DataFrame):
+                return ChainableMagicTable(final_result)
+            else:
+                return ChainableMagicTable(cast(List[Dict[str, Any]], final_result))
 
         return wrapper
 
     return decorator
+
+
+# Helper functions for mai decorator
+def check_cache_and_get_new_items(cursor, table_name, batch, keys):
+    placeholders = ",".join(["?" for _ in keys])
+    cursor.execute(
+        f"SELECT id, response FROM [{table_name}] WHERE id IN ({placeholders})",
+        keys,
+    )
+    cached_results = {row[0]: json.loads(row[1]) for row in cursor.fetchall()}
+    new_items = [item for item, key in zip(batch, keys) if key not in cached_results]
+    new_keys = [key for key in keys if key not in cached_results]
+    return cached_results, new_items, new_keys
