@@ -1,4 +1,4 @@
-from .decorators import mtable, mgen
+from .decorators import mtable, mai
 from .query import (
     query_magic_db,
     get_table_info,
@@ -9,7 +9,7 @@ from .query import (
 
 __all__ = [
     "mtable",
-    "mgen",
+    "mai",
     "query_magic_db",
     "get_table_info",
     "join_magic_tables",

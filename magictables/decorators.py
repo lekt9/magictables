@@ -2,6 +2,7 @@ import functools
 import json
 import hashlib
 import logging
+import re
 import sqlite3
 import pandas as pd
 import requests
@@ -28,17 +29,23 @@ logging.basicConfig(level=logging.CRITICAL)
 
 
 class ChainableMagicTable:
-    def __init__(self, data: Union[pd.DataFrame, List[Dict[str, Any]]]):
+    def __init__(
+        self,
+        data: Union[pd.DataFrame, List[Dict[str, Any]]],
+        func_name: Optional[str] = None,
+    ):
         if isinstance(data, pd.DataFrame):
             self.df = data
         else:
             self.df = pd.DataFrame(data)
 
+        self.type_hint = get_type_hint(func_name) if func_name else None
+
     def join(
         self,
         other: "ChainableMagicTable",
         how: str = "inner",
-        on: Union[str, List[str]] = None,
+        on: Optional[Union[str, List[str]]] = None,
     ) -> "ChainableMagicTable":
         self.df = self.df.merge(other.df, how=how, on=on)
         return self
@@ -67,6 +74,12 @@ class ChainableMagicTable:
         ] = "records",
     ) -> Union[Dict[Hashable, Any], List[Dict[Hashable, Any]]]:
         return self.df.to_dict(orient)
+
+    def to_typed_dict(self) -> Union[Dict[Hashable, Any], List[Dict[Hashable, Any]]]:
+        if self.type_hint:
+            return [self.type_hint(**row) for _, row in self.df.iterrows()]
+        else:
+            return self.to_dict()
 
 
 def flatten_dict(d: Dict, parent_key: str = "", sep: str = "_") -> Dict:
@@ -205,6 +218,9 @@ def cache_results(
             f"""
             INSERT OR REPLACE INTO [{table_name}] (id, {', '.join(columns)})
             VALUES (?, {placeholders})
+Certainly! Here's the continuation of the decorators.py file:
+
+```python
             """,
             (key, *values),
         )
@@ -350,13 +366,13 @@ def mtable() -> Callable[[Callable[..., T]], Callable[..., ChainableMagicTable]]
 
                     if result is not None:
                         if isinstance(result, pd.DataFrame):
-                            return ChainableMagicTable(result)
+                            return ChainableMagicTable(result, func.__name__)
                         elif isinstance(result, list) and all(
                             isinstance(item, dict) for item in result
                         ):
-                            return ChainableMagicTable(result)
+                            return ChainableMagicTable(result, func.__name__)
                         elif isinstance(result, dict):
-                            return ChainableMagicTable([result])
+                            return ChainableMagicTable([result], func.__name__)
                         else:
                             raise ValueError(
                                 f"Unsupported return type from {func.__name__}: {type(result)}"
@@ -364,7 +380,7 @@ def mtable() -> Callable[[Callable[..., T]], Callable[..., ChainableMagicTable]]
                     else:
                         raise ValueError(f"Function {func.__name__} returned None")
 
-            return ChainableMagicTable(result)
+            return ChainableMagicTable(result, func.__name__)
 
         return wrapper
 
@@ -449,9 +465,11 @@ def mai(
 
             # Add type assertion here
             if isinstance(final_result, pd.DataFrame):
-                return ChainableMagicTable(final_result)
+                return ChainableMagicTable(final_result, func.__name__)
             else:
-                return ChainableMagicTable(cast(List[Dict[str, Any]], final_result))
+                return ChainableMagicTable(
+                    cast(List[Dict[str, Any]], final_result), func.__name__
+                )
 
         return wrapper
 
