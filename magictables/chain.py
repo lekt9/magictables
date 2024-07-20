@@ -53,15 +53,33 @@ class ChainedMTable:
             logging.info(
                 f"Missing parameters: {missing_params}. Generating AI mapping."
             )
-            ai_mapping = generate_ai_mapping(df, missing_params)
 
-            for param, expr in ai_mapping.items():
-                try:
-                    params[param] = df.select(pl.eval(expr)).to_series().to_list()
-                except Exception as e:
-                    logging.error(
-                        f"Error applying AI-generated mapping for {param}: {str(e)}"
+            max_attempts = 3
+            for attempt in range(max_attempts):
+                ai_mapping = generate_ai_mapping(df, missing_params)
+
+                success = True
+                for param, expr in ai_mapping.items():
+                    try:
+                        params[param] = df.select(pl.eval(expr)).to_series().to_list()
+                    except Exception as e:
+                        logging.error(
+                            f"Error applying AI-generated mapping for {param}: {str(e)}"
+                        )
+                        success = False
+                        break
+
+                if success:
+                    break
+                else:
+                    logging.warning(
+                        f"AI mapping attempt {attempt + 1} failed. Retrying..."
                     )
+
+            if not success:
+                logging.error(
+                    "All AI mapping attempts failed. Falling back to column guessing."
+                )
 
         # If still missing parameters, use AI to guess the most appropriate column
         if len(params) < len(required_params):
