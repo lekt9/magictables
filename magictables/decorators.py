@@ -1,23 +1,43 @@
 import ast
 import polars as pl
-
 import functools
 import logging
 from typing import Any, Callable, Dict, TypeVar, Optional
 from typing_extensions import ParamSpec
-import polars as pl
 from .database import magic_db
 from .utils import (
     apply_mapping,
-    flatten_dataframe,
     generate_call_id,
     generate_row_id,
-    ensure_dataframe,
     call_ai_model,
 )
 
 P = ParamSpec("P")
 R = TypeVar("R")
+
+
+def flatten_nested_structure(nested_structure):
+    flattened_rows = []
+
+    def flatten(obj, prefix=""):
+        if isinstance(obj, dict):
+            row = {}
+            for key, value in obj.items():
+                new_key = f"{prefix}_{key}" if prefix else key
+                if isinstance(value, (dict, list)):
+                    flatten(value, new_key)
+                else:
+                    row[new_key] = value
+            if row:
+                flattened_rows.append(row)
+        elif isinstance(obj, list):
+            for item in obj:
+                flatten(item, prefix)
+        else:
+            flattened_rows.append({prefix: obj})
+
+    flatten(nested_structure)
+    return flattened_rows
 
 
 def mtable(query: Optional[str] = None):
@@ -36,22 +56,25 @@ def mtable(query: Optional[str] = None):
                 print(f"Cache miss for {f.__name__}")
                 # Execute the function
                 result = f(*args, **kwargs)
-                df = ensure_dataframe(result)
+
+                print("result", result)
+
+                # Flatten the nested structure
+                flattened_data = flatten_nested_structure(result)
+
+                # Convert flattened data to DataFrame
+                df = pl.DataFrame(flattened_data)
+
                 logging.info(f"1df shape: {df.shape}")
 
                 # If query is provided, generate and apply mapping
                 if query:
-                    # Get the parameters of the next function in the chain
                     next_function_params = getattr(f, "next_function_params", {})
                     mapping = generate_mapping(df, query, next_function_params)
                     logging.info(f"mapping: {mapping}")
                     df = apply_mapping(df, mapping)
-                    # Store the mapping in the database
                     magic_db.store_mapping(table_name, mapping)
                     logging.info(f"Stored mapping for {table_name}")
-
-                # Flatten the DataFrame to 1NF
-                df = flatten_dataframe(df)
 
                 # Generate row IDs
                 df = df.with_columns(
@@ -69,8 +92,8 @@ def mtable(query: Optional[str] = None):
                 return df
 
         wrapper.function_name = f.__name__
-        wrapper.query = query  # Store the query for later use
-        wrapper.func_params = f.__annotations__  # Store the function parameters
+        wrapper.query = query
+        wrapper.func_params = f.__annotations__
         return wrapper
 
     return decorator
@@ -141,29 +164,3 @@ def generate_mapping(
     else:
         logging.warning("AI could not generate a suitable mapping.")
         return {}
-
-
-# def apply_mapping(df: pl.DataFrame, mapping: Dict[str, Any]) -> pl.DataFrame:
-#     logging.info(f"Current DataFrame columns: {df.columns}")
-
-#     valid_mappings = {}
-#     for new_col, expr in mapping.items():
-#         try:
-#             # Evaluate the string as a Polars expression
-#             valid_mappings[new_col] = eval(expr)
-#         except Exception as e:
-#             logging.warning(
-#                 f"Skipping invalid mapping for '{new_col}': {expr}. Error: {str(e)}"
-#             )
-
-#     if not valid_mappings:
-#         logging.warning("No valid mappings found. Returning original DataFrame.")
-#         return df
-
-#     try:
-#         return df.with_columns(
-#             [expr.alias(new_col) for new_col, expr in valid_mappings.items()]
-#         )
-#     except Exception as e:
-#         logging.error(f"Error applying mappings: {str(e)}")
-#         return df
