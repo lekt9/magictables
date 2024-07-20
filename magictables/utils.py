@@ -1,6 +1,7 @@
 import re
 import ast
 import dateparser
+import pandas as pd
 import polars as pl
 from typing import Dict, Any, Union
 import ast
@@ -64,18 +65,40 @@ def generate_schema(data: Union[pl.DataFrame, Dict[str, Any]]) -> Dict[str, str]
         raise ValueError("Input must be a Polars DataFrame or a dictionary")
 
 
-def ensure_dataframe(data: Any) -> pl.DataFrame:
-    if isinstance(data, pl.DataFrame):
-        return data
-    elif isinstance(data, dict):
-        return pl.DataFrame([data])
-    elif isinstance(data, list):
-        if all(isinstance(item, dict) for item in data):
-            return pl.DataFrame(data)
+def flatten_nested_structure(nested_structure):
+    flattened_rows = []
+
+    def flatten(obj, prefix=""):
+        if isinstance(obj, dict):
+            row = {}
+            for key, value in obj.items():
+                new_key = f"{prefix}_{key}" if prefix else key
+                if isinstance(value, (dict, list)):
+                    flatten(value, new_key)
+                else:
+                    row[new_key] = value
+            if row:
+                flattened_rows.append(row)
+        elif isinstance(obj, list):
+            for item in obj:
+                flatten(item, prefix)
         else:
-            return pl.DataFrame({"data": data})
+            flattened_rows.append({prefix: obj})
+
+    flatten(nested_structure)
+    return flattened_rows
+
+
+def ensure_dataframe(result):
+    if isinstance(result, pl.DataFrame):
+        return result
+    elif isinstance(result, pd.DataFrame):
+        return pl.from_pandas(result)
+    elif isinstance(result, (list, dict)):
+        flattened = flatten_nested_structure(result)
+        return pl.DataFrame(flattened)
     else:
-        return pl.DataFrame({"data": [data]})
+        raise ValueError(f"Unsupported result type: {type(result)}")
 
 
 def call_ai_model(input_data: Dict[str, Any], prompt: str) -> Dict[str, Any]:
@@ -315,7 +338,9 @@ def flatten_dataframe(df: pl.DataFrame) -> pl.DataFrame:
     return df
 
 
-def generate_ai_mapping(df: pl.DataFrame, required_params: List[str]) -> Dict[str, str]:
+def generate_ai_mapping(
+    df: pl.DataFrame, required_params: List[str]
+) -> Dict[str, Union[str, List[str]]]:
     df_info = {
         "current_schema": {
             col: str(dtype) for col, dtype in zip(df.columns, df.dtypes)
@@ -328,24 +353,29 @@ def generate_ai_mapping(df: pl.DataFrame, required_params: List[str]) -> Dict[st
     Given the current DataFrame schema, the query, and the parameters required by the next function in the chain,
     generate a mapping to transform the Polars DataFrame. 
     The mapping should be a dictionary where:
-    - Keys are the desired column names (matching the next function's parameters if possible)
-    - Values are Python expressions using the current column names and Polars functions
+    - Keys are the required parameters
+    - Values are either:
+      a) A single Python expression using the current column names and Polars functions
+      b) A list of potential column names, ordered by likelihood of being the correct match
 
-    You can use any Polars functions or Python operations. For example:
+    You can use any Polars functions or Python operations for expressions. For example:
     - "new_col": "pl.col('existing_col') * 2"
     - "combined": "pl.col('col1') + ' ' + pl.col('col2')"
     - "transformed": "pl.when(pl.col('col') > 10).then(pl.lit('High')).otherwise(pl.lit('Low'))"
 
+    For lists of potential columns, simply provide the column names. For example:
+    - "user_id": ["user_id", "id", "user_identifier"]
+
     Ensure that the mapping includes all required parameters for the next function.
-    If a required parameter is not directly available, try to derive it from existing columns.
+    If a required parameter is not directly available, try to derive it from existing columns or provide a list of potential matches.
 
     Return the mapping as a Python dictionary.
     """
 
     ai_response = call_ai_model(df_info, prompt)
 
-    if isinstance(ai_response, list) and len(ai_response) > 0:
-        mapping = ai_response[0].get("mapping", {})
+    if isinstance(ai_response, dict) and "mapping" in ai_response:
+        mapping = ai_response["mapping"]
     else:
         mapping = {}
 
@@ -501,15 +531,27 @@ def apply_transformation(df: pl.DataFrame, transformation: str) -> pl.DataFrame:
     return df
 
 
-def apply_mapping(df: pl.DataFrame, mapping: Dict[str, Any]) -> pl.DataFrame:
+def apply_mapping(
+    df: pl.DataFrame, mapping: Dict[str, Union[str, List[str]]]
+) -> pl.DataFrame:
     valid_mappings = {}
-    for new_col, expr in mapping.items():
-        try:
-            valid_mappings[new_col] = eval(expr)
-        except Exception as e:
-            logging.warning(
-                f"Skipping invalid mapping for '{new_col}': {expr}. Error: {str(e)}"
-            )
+    for new_col, expr_or_cols in mapping.items():
+        if isinstance(expr_or_cols, str):
+            try:
+                valid_mappings[new_col] = eval(expr_or_cols)
+            except Exception as e:
+                logging.warning(
+                    f"Skipping invalid mapping for '{new_col}': {expr_or_cols}. Error: {str(e)}"
+                )
+        elif isinstance(expr_or_cols, list):
+            for col in expr_or_cols:
+                if col in df.columns:
+                    valid_mappings[new_col] = pl.col(col)
+                    break
+            else:
+                logging.warning(
+                    f"No valid column found for '{new_col}' in {expr_or_cols}"
+                )
 
     if not valid_mappings:
         return df

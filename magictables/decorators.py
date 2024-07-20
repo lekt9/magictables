@@ -7,6 +7,7 @@ from typing_extensions import ParamSpec
 from .database import magic_db
 from .utils import (
     apply_mapping,
+    ensure_dataframe,
     generate_call_id,
     generate_row_id,
     call_ai_model,
@@ -14,30 +15,6 @@ from .utils import (
 
 P = ParamSpec("P")
 R = TypeVar("R")
-
-
-def flatten_nested_structure(nested_structure):
-    flattened_rows = []
-
-    def flatten(obj, prefix=""):
-        if isinstance(obj, dict):
-            row = {}
-            for key, value in obj.items():
-                new_key = f"{prefix}_{key}" if prefix else key
-                if isinstance(value, (dict, list)):
-                    flatten(value, new_key)
-                else:
-                    row[new_key] = value
-            if row:
-                flattened_rows.append(row)
-        elif isinstance(obj, list):
-            for item in obj:
-                flatten(item, prefix)
-        else:
-            flattened_rows.append({prefix: obj})
-
-    flatten(nested_structure)
-    return flattened_rows
 
 
 def mtable(query: Optional[str] = None):
@@ -54,42 +31,64 @@ def mtable(query: Optional[str] = None):
                 return cached_result
             else:
                 print(f"Cache miss for {f.__name__}")
-                # Execute the function
-                result = f(*args, **kwargs)
 
-                print("result", result)
+                # Separate actual values from potential column names
+                actual_kwargs = {}
+                potential_columns = {}
 
-                # Flatten the nested structure
-                flattened_data = flatten_nested_structure(result)
+                for param, value in kwargs.items():
+                    if isinstance(value, list) and all(
+                        isinstance(col, str) for col in value
+                    ):
+                        potential_columns[param] = value
+                    else:
+                        actual_kwargs[param] = value
 
-                # Convert flattened data to DataFrame
-                df = pl.DataFrame(flattened_data)
+                # Try all potential columns for each parameter
+                for param, columns in potential_columns.items():
+                    for col in columns:
+                        try:
+                            temp_kwargs = {**actual_kwargs, param: col}
+                            result = f(*args, **temp_kwargs)
+                            if result is not None:
+                                actual_kwargs[param] = col
+                                break
+                        except Exception as e:
+                            logging.warning(
+                                f"Error with column {col} for {param}: {str(e)}"
+                            )
+                    else:
+                        # If no column worked, use the first one as a fallback
+                        actual_kwargs[param] = columns[0]
 
-                logging.info(f"1df shape: {df.shape}")
+                # Call the function with the final arguments
+                result = f(*args, **actual_kwargs)
 
-                # If query is provided, generate and apply mapping
-                if query:
-                    next_function_params = getattr(f, "next_function_params", {})
-                    mapping = generate_mapping(df, query, next_function_params)
-                    logging.info(f"mapping: {mapping}")
-                    df = apply_mapping(df, mapping)
-                    magic_db.store_mapping(table_name, mapping)
-                    logging.info(f"Stored mapping for {table_name}")
+                # Convert result to DataFrame if it's not already
+                df = ensure_dataframe(result)
 
-                # Generate row IDs
-                df = df.with_columns(
-                    pl.struct(df.columns).map_elements(generate_row_id).alias("id")
-                )
+            if query:
+                next_function_params = getattr(f, "next_function_params", {})
+                mapping = generate_mapping(df, query, next_function_params)
+                logging.info(f"mapping: {mapping}")
+                df = apply_mapping(df, mapping)
+                magic_db.store_mapping(table_name, mapping)
+                logging.info(f"Stored mapping for {table_name}")
 
-                # Add function parameters as columns
-                for arg_name, arg_value in kwargs.items():
-                    if isinstance(arg_value, (int, float, str, bool)):
-                        df = df.with_columns(pl.lit(arg_value).alias(arg_name))
+            # Generate row IDs
+            df = df.with_columns(
+                pl.struct(df.columns).map_elements(generate_row_id).alias("id")
+            )
 
-                # Cache the flattened results
-                magic_db.cache_results(table_name, df, call_id)
+            # Add function parameters as columns
+            for arg_name, arg_value in actual_kwargs.items():
+                if isinstance(arg_value, (int, float, str, bool)):
+                    df = df.with_columns(pl.lit(arg_value).alias(arg_name))
 
-                return df
+            # Cache the results
+            magic_db.cache_results(table_name, df, call_id)
+
+            return df
 
         wrapper.function_name = f.__name__
         wrapper.query = query

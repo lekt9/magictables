@@ -3,7 +3,7 @@ from typing import List, Callable, Any, Dict, Optional
 import logging
 
 from .mapping import get_stored_mapping
-from .utils import apply_mapping, generate_ai_mapping, call_ai_model
+from .utils import apply_mapping, ensure_dataframe, generate_ai_mapping, call_ai_model
 
 
 class ChainedMTable:
@@ -26,6 +26,10 @@ class ChainedMTable:
 
                 extracted_params = self._extract_params(result, func, func_params)
                 result = func(**extracted_params)
+
+            # Ensure the result is always a DataFrame
+            result = ensure_dataframe(result)
+
         return result
 
     def _extract_params(
@@ -37,15 +41,39 @@ class ChainedMTable:
 
         required_params = [param for param in func_params if param != "return"]
 
-        # Try to extract parameters using existing methods
         for param_name in required_params:
             if param_name in df.columns:
-                params[param_name] = df[param_name].to_list()
+                # Get the first non-null value from the column
+                values = df[param_name].drop_nulls()
+                if len(values) > 0:
+                    params[param_name] = values[0]
+                else:
+                    logging.warning(
+                        f"No non-null values found for parameter '{param_name}'"
+                    )
             elif param_name.lower() in [col.lower() for col in df.columns]:
                 matching_col = next(
                     col for col in df.columns if col.lower() == param_name.lower()
                 )
-                params[param_name] = df[matching_col].to_list()
+                values = df[matching_col].drop_nulls()
+                if len(values) > 0:
+                    params[param_name] = values[0]
+                else:
+                    logging.warning(
+                        f"No non-null values found for parameter '{param_name}'"
+                    )
+            else:
+                guessed_columns = self._guess_column_for_param(
+                    df, param_name, func.__name__
+                )
+                if guessed_columns:
+                    values = df[guessed_columns[0]].drop_nulls()
+                    if len(values) > 0:
+                        params[param_name] = values[0]
+                    else:
+                        logging.warning(
+                            f"No non-null values found for guessed column '{guessed_columns[0]}'"
+                        )
 
         # If not all required parameters are found, use AI to generate mapping
         if len(params) < len(required_params):
@@ -54,45 +82,20 @@ class ChainedMTable:
                 f"Missing parameters: {missing_params}. Generating AI mapping."
             )
 
-            max_attempts = 3
-            for attempt in range(max_attempts):
-                ai_mapping = generate_ai_mapping(df, missing_params)
-
-                success = True
-                for param, expr in ai_mapping.items():
-                    try:
-                        params[param] = df.select(pl.eval(expr)).to_series().to_list()
-                    except Exception as e:
-                        logging.error(
-                            f"Error applying AI-generated mapping for {param}: {str(e)}"
+            ai_mapping = generate_ai_mapping(df, missing_params)
+            for param, expr in ai_mapping.items():
+                try:
+                    values = df.select(pl.eval(expr)).to_series().drop_nulls()
+                    if len(values) > 0:
+                        params[param] = values[0]
+                    else:
+                        logging.warning(
+                            f"No non-null values found for AI-generated mapping '{expr}'"
                         )
-                        success = False
-                        break
-
-                if success:
-                    break
-                else:
-                    logging.warning(
-                        f"AI mapping attempt {attempt + 1} failed. Retrying..."
+                except Exception as e:
+                    logging.error(
+                        f"Error applying AI-generated mapping for {param}: {str(e)}"
                     )
-
-            if not success:
-                logging.error(
-                    "All AI mapping attempts failed. Falling back to column guessing."
-                )
-
-        # If still missing parameters, use AI to guess the most appropriate column
-        if len(params) < len(required_params):
-            missing_params = [param for param in required_params if param not in params]
-            for param in missing_params:
-                ai_guess = self._guess_column_for_param(df, param, func.__name__)
-                if ai_guess:
-                    params[param] = df[ai_guess].to_list()
-
-        # Ensure single-value parameters are not passed as lists
-        for param, value in params.items():
-            if isinstance(value, list) and len(value) == 1:
-                params[param] = value[0]
 
         logging.debug(f"Extracted parameters for {func.__name__}: {params}")
         return params
@@ -237,22 +240,22 @@ class ChainedMTable:
 
     def _guess_column_for_param(
         self, df: pl.DataFrame, param_name: str, func_name: str
-    ) -> Optional[str]:
+    ) -> List[str]:
         prompt = f"""
         Given a DataFrame with the following columns:
         {df.columns}
 
         And a function named '{func_name}' that requires a parameter '{param_name}',
-        which column from the DataFrame would be the most appropriate to use for this parameter?
+        which columns from the DataFrame would be the most appropriate to use for this parameter?
 
         Consider the following:
         1. Semantic similarities between the parameter name and column names
         2. Data types of the columns
         3. Common naming conventions for IDs or foreign keys
 
-        Return the name of the most appropriate column, or None if no suitable column can be identified.
+        Return a list of column names, ordered by likelihood of being the correct match.
         Put it in a JSON object for {{
-            "column": <column name>
+            "columns": [<column names>]
         }}
         """
 
@@ -261,22 +264,18 @@ class ChainedMTable:
             prompt,
         )
 
-        if ai_response and isinstance(ai_response, dict) and "column" in ai_response:
-            guessed_column = ai_response["column"]
-            if guessed_column in df.columns:
-                logging.info(
-                    f"AI guessed column '{guessed_column}' for parameter '{param_name}'"
-                )
-                return guessed_column
-            else:
-                logging.warning(
-                    f"AI guessed column '{guessed_column}' is not in the DataFrame"
-                )
-
-        logging.warning(
-            f"AI could not guess a suitable column for parameter '{param_name}'"
-        )
-        return None
+        if ai_response and isinstance(ai_response, dict) and "columns" in ai_response:
+            guessed_columns = ai_response["columns"]
+            valid_columns = [col for col in guessed_columns if col in df.columns]
+            logging.info(
+                f"AI guessed columns {valid_columns} for parameter '{param_name}'"
+            )
+            return valid_columns
+        else:
+            logging.warning(
+                f"AI could not guess suitable columns for parameter '{param_name}'"
+            )
+            return []
 
 
 def create_chain(*functions: Callable) -> ChainedMTable:
