@@ -1,5 +1,4 @@
 import hashlib
-import pandas as pd
 import requests
 import json
 import logging
@@ -10,6 +9,7 @@ import re
 from dotenv import load_dotenv
 import requests
 from hashlib import md5
+import polars as pl
 
 load_dotenv()
 
@@ -20,17 +20,17 @@ OPENAI_BASE_URL = os.environ.get(
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 
 
-def ensure_dataframe(result: Any) -> pd.DataFrame:
-    if isinstance(result, pd.DataFrame):
+def ensure_dataframe(result: Any) -> pl.DataFrame:
+    if isinstance(result, pl.DataFrame):
         return result
     elif isinstance(result, dict):
-        return pd.DataFrame([result])
+        return pl.DataFrame([result])
     elif isinstance(result, list):
         if all(isinstance(item, dict) for item in result):
-            return pd.DataFrame(result)
+            return pl.DataFrame(result)
         else:
             try:
-                return pd.DataFrame(result)
+                return pl.DataFrame(result)
             except ValueError:
                 raise ValueError(
                     "List items are not consistent for DataFrame conversion."
@@ -42,7 +42,7 @@ def ensure_dataframe(result: Any) -> pd.DataFrame:
         except json.JSONDecodeError:
             raise ValueError("String input is not valid JSON.")
     else:
-        return pd.DataFrame({"result": [result]})
+        return pl.DataFrame({"result": [result]})
 
 
 def call_ai_model(

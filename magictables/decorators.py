@@ -32,12 +32,8 @@ def generate_call_id(func: Callable, *args: Any, **kwargs: Any) -> str:
         return hashlib.md5(str(call_data).encode()).hexdigest()
 
 
-def generate_row_id(row: Union[Dict[str, Any], pl.Series]) -> str:
-    if isinstance(row, pl.Series):
-        row_dict = row.to_dict()
-    else:
-        row_dict = row
-    row_data = json.dumps(row_dict, sort_keys=True, default=str)
+def generate_row_id(row: Dict[str, Any]) -> str:
+    row_data = json.dumps(row, sort_keys=True)
     return hashlib.md5(row_data.encode()).hexdigest()
 
 
@@ -71,7 +67,7 @@ def mtable(func: Optional[Callable] = None) -> Callable[[T], T]:
 
             # Generate row IDs
             result_df = result_df.with_columns(
-                pl.struct(result_df.columns).apply(generate_row_id).alias("id")
+                pl.struct(result_df.columns).map_elements(generate_row_id).alias("id")
             )
 
             magic_db.cache_results(table_name, result_df, call_id)
@@ -117,10 +113,10 @@ def mai(
 
             # Generate row IDs
             result_df = result_df.with_columns(
-                pl.struct(result_df.columns).apply(generate_row_id).alias("id")
+                pl.struct(result_df.columns).map_elements(generate_row_id).alias("id")
             )
 
-            data = result_df.to_dict(as_series=False)
+            data = result_df.to_dicts()
             logging.info(f"Processing batches for {f.__name__}")
             ai_results = process_batches(table_name, data, batch_size, query)
 
@@ -186,13 +182,28 @@ def combine_results(
         ai_results = ai_results[: len(result_df)]
         for i, ai_result in enumerate(ai_results):
             for key, value in ai_result.items():
-                if key in result_df.columns:
-                    if value is not None and not pl.Series([value]).is_null().any():
+                if value is not None and not pl.Series([value]).is_null().any():
+                    if key in result_df.columns:
+                        # If the column already exists, update it
                         result_df = result_df.with_columns(
-                            pl.col(key).set_at_idx(i, value)
+                            pl.when(pl.arange(0, len(result_df)) == i)
+                            .then(pl.lit(value))
+                            .otherwise(pl.col(key))
+                            .alias(key)
                         )
-                else:
-                    result_df = result_df.with_columns(pl.lit(None).alias(key))
-                    result_df = result_df.with_columns(pl.col(key).set_at_idx(i, value))
+                    else:
+                        # If it's a new column, add it with a unique name
+                        new_key = key
+                        counter = 1
+                        while new_key in result_df.columns:
+                            new_key = f"{key}_{counter}"
+                            counter += 1
+                        result_df = result_df.with_columns(
+                            pl.when(pl.arange(0, len(result_df)) == i)
+                            .then(pl.lit(value))
+                            .otherwise(pl.lit(None))
+                            .alias(new_key)
+                        )
+        return result_df
     else:
         raise ValueError("Invalid mode. Must be either 'generate' or 'augment'")

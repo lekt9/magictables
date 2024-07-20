@@ -1,5 +1,5 @@
 import dataset
-import pandas as pd
+import polars as pl
 from typing import List, Dict, Any, Optional
 import json
 from datetime import datetime
@@ -38,15 +38,15 @@ class MagicTable:
     def get_all(self) -> List[Dict[str, Any]]:
         return list(self.table.all())
 
-    def to_dataframe(self) -> pd.DataFrame:
-        return pd.DataFrame(self.get_all())
+    def to_dataframe(self) -> pl.DataFrame:
+        return pl.DataFrame(self.get_all())
 
     def to_json(self) -> str:
         return json.dumps(self.get_all())
 
-    def from_dataframe(self, df: pd.DataFrame):
-        for _, row in df.iterrows():
-            self.insert(row["id"], row.to_dict())
+    def from_dataframe(self, df: pl.DataFrame):
+        for row in df.iter_rows(named=True):
+            self.insert(row["id"], row)
 
     def from_json(self, json_str: str):
         data = json.loads(json_str)

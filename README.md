@@ -67,7 +67,7 @@ def fetch_github_repos(username: str) -> List[Dict[str, Any]]:
     ]
 
 @mtable()
-def process_repo_data(repos: pd.DataFrame) -> pd.DataFrame:
+def process_repo_data(repos: pl.DataFrame) -> pl.DataFrame:
     """Process and filter repository data."""
     return (
         repos[repos["stars"] > 0]
@@ -78,7 +78,7 @@ def process_repo_data(repos: pd.DataFrame) -> pd.DataFrame:
     )
 
 @mai(batch_size=5, mode="augment", query="add a haiku for the repo")
-def generate_repo_summary(repos: pd.DataFrame) -> pd.DataFrame:
+def generate_repo_summary(repos: pl.DataFrame) -> pl.DataFrame:
     """Generate AI summaries for repositories."""
     return repos
 
@@ -158,7 +158,7 @@ The `query()` function provides a fluent interface for constructing SQL queries 
     mode="generate",
     query="Generate a detailed description of the repository"
 )
-def generate_repo_description(repos: pd.DataFrame) -> pd.DataFrame:
+def generate_repo_description(repos: pl.DataFrame) -> pl.DataFrame:
     return repos
 ```
 

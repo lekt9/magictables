@@ -45,6 +45,10 @@ class DatasetQueryBuilder:
     def count(self) -> int:
         return self.table.count(**self.filters)
 
+    def __del__(self):
+        if hasattr(self, "db"):
+            self.db.close()
+
 
 def query(table_name: str) -> DatasetQueryBuilder:
     return DatasetQueryBuilder(table_name)

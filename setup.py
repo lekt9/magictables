@@ -10,6 +10,7 @@ setup(
         "python-dotenv",
         "dataset",
         "pandera",
+        "polars",
     ],
     extras_require={
         "dev": ["pytest", "pytest-cov", "black", "isort", "flake8"],

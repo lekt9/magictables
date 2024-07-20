@@ -23,6 +23,7 @@ keywords = ["cache", "api", "ai", "decorator", "etl"]
 dependencies = [
     "pandas",
     "pandera",
+    "polars",
     "requests",
     "python-dotenv",
     "dataset",
