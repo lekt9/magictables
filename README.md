@@ -28,17 +28,29 @@ pip install magictables
 ## Quick Start
 
 ```python
+import logging
 import os
 from typing import List, Dict, Any
 from dotenv import load_dotenv
 import requests
 import pandas as pd
-from magictables import mtable, mai, query
+from magictables import mtable, mai
+from magictables.query import query
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
+
+# Load environment variables
 load_dotenv()
+
+# Ensure you have set the OPENAI_API_KEY in your .env file
+# OPENAI_API_KEY=your_api_key_here
 
 @mtable()
 def fetch_github_repos(username: str) -> List[Dict[str, Any]]:
+    """Fetch GitHub repositories for a given user."""
     url = f"https://api.github.com/users/{username}/repos"
     response = requests.get(url)
     repos = response.json()
@@ -56,6 +68,7 @@ def fetch_github_repos(username: str) -> List[Dict[str, Any]]:
 
 @mtable()
 def process_repo_data(repos: pd.DataFrame) -> pd.DataFrame:
+    """Process and filter repository data."""
     return (
         repos[repos["stars"] > 0]
         .assign(popularity_score=lambda df: df["stars"] + df["forks"])
@@ -64,53 +77,55 @@ def process_repo_data(repos: pd.DataFrame) -> pd.DataFrame:
         ]
     )
 
-@mai(
-    batch_size=50,
-    mode="augment"
-)
+@mai(batch_size=5, mode="augment", query="add a haiku for the repo")
 def generate_repo_summary(repos: pd.DataFrame) -> pd.DataFrame:
+    """Generate AI summaries for repositories."""
     return repos
 
-# Usage
-username = "octocat"
-raw_repos = fetch_github_repos(username)
-processed_repos = process_repo_data(raw_repos)
-repos_with_summary = generate_repo_summary(processed_repos)
+# Main execution
+if __name__ == "__main__":
+    # Fetch and process data
+    username = "lewistham9x"
+    raw_repos = fetch_github_repos(username)
+    processed_repos = process_repo_data(raw_repos)
+    repos_with_summary = generate_repo_summary(processed_repos)
 
-print(repos_with_summary)
+    logging.info("Repositories with AI-generated summaries:")
+    logging.info(repos_with_summary)
 
-# Query the shadow database
-results = (
-    query("ai_generate_repo_summary")
-    .where("popularity_score > 10")
-    .order("popularity_score", ascending=False)
-    .limit(5)
-    .execute()
-)
-print(results)
+    # Demonstrate caching
+    logging.info("\nDemonstrating caching (should be faster):")
+    cached_repos = fetch_github_repos(username)
+    logging.info(f"Cached repos fetched for {username}")
+
+    # Query examples
+    # Fetch all results
+    all_results = query("ai_generate_repo_summary").all()
+    logging.info("All results: %s", all_results)
+
+    # Filter results
+    python_projects = query("ai_generate_repo_summary").filter(language="Python").all()
+    logging.info("Python projects: %s", python_projects)
+
+    # Order results
+    top_projects = (
+        query("ai_generate_repo_summary").order_by("-popularity_score").limit(5).all()
+    )
+    logging.info("Top 5 projects by popularity: %s", top_projects)
+
+    # Count results
+    project_count = (
+        query("ai_generate_repo_summary").filter(popularity_score={">=": 2}).count()
+    )
+    logging.info(
+        "Number of projects with popularity score greater than or equal to 2: %d",
+        project_count,
+    )
+
+    # Get first result
+    first_project = query("ai_generate_repo_summary").first()
+    logging.info("First project in the database: %s", first_project)
 ```
-
-## Environment Setup and Configuration
-
-MagicTables uses environment variables for configuration, particularly for AI-related features. These variables are typically stored in a `.env` file in your project root. Here's how to set it up:
-
-1. Create a `.env` file in your project root directory.
-2. Add your configuration variables to the `.env` file. For example:
-
-   ```
-   OPENAI_API_KEY=your_api_key_here
-   OPENAI_BASE_URL=https://openrouter.ai/api/v1/chat/completions
-   OPENAI_MODEL=gpt-4o-mini
-   ```
-
-3. In your Python script, make sure to load the environment variables before importing MagicTables:
-
-   ```python
-   from dotenv import load_dotenv
-   load_dotenv()  # This line must come before importing MagicTables
-
-   from magictables import mtable, mai, query
-   ```
 
 ## How It Works
 
@@ -129,7 +144,7 @@ This allows you to enrich your data with AI-generated insights seamlessly.
 
 ### query()
 
-The `query()` function provides a fluent interface for constructing SQL queries without writing raw SQL. It allows you to chain methods like `where()`, `order()`, and `limit()` to build and execute queries on the shadow database.
+The `query()` function provides a fluent interface for constructing SQL queries without writing raw SQL. It allows you to chain methods like `filter()`, `order_by()`, and `limit()` to build and execute queries on the shadow database.
 
 ## Advanced Usage
 
@@ -138,12 +153,13 @@ The `query()` function provides a fluent interface for constructing SQL queries 
 ```python
 @mai(
     api_key=os.environ["OPENAI_API_KEY"],
-    model="anthropic/claude-2",
+    model="openai/gpt-4o-mini",
     batch_size=20,
-    mode="generate"
+    mode="generate",
+    query="Generate a detailed description of the repository"
 )
-def generate_user_bio(username: str, company: str):
-    return {"username": username, "company": company}
+def generate_repo_description(repos: pd.DataFrame) -> pd.DataFrame:
+    return repos
 ```
 
 ### Working with Nested Data
@@ -154,12 +170,11 @@ MagicTables automatically handles nested data structures, storing them in separa
 
 ```python
 results = (
-    query("your_table_name")
-    .where("column1 > 10")
-    .where("column2 LIKE '%pattern%'")
-    .order("column3", ascending=False)
-    .limit(100)
-    .execute()
+    query("ai_generate_repo_summary")
+    .filter(language="Python", popularity_score={">=": 10})
+    .order_by("-popularity_score")
+    .limit(5)
+    .all()
 )
 ```
 
@@ -170,6 +185,8 @@ results = (
 3. Use batch processing with the `batch_size` parameter in `@mai()` for large datasets.
 4. Regularly maintain and clean up your shadow database to remove outdated data.
 5. Leverage the query builder for complex data analysis tasks.
+6. Use environment variables for sensitive information like API keys.
+7. Implement logging to track the execution flow and debug issues more easily.
 
 ## Contributing
 
