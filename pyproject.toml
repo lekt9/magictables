@@ -24,6 +24,7 @@ dependencies = [
     "pandas",
     "pandera[polars]",
     "polars",
+    "litellm",
     "polars-lts-cpu",
     "typing_extensions",
     "dateparser",
@@ -31,7 +32,10 @@ dependencies = [
     "python-dotenv",
     "dataset",
     "pytest",
+    "jina",
+    "PyPDF2",
     "pre-commit",
+    "pydantic",
 ]
 requires-python = ">=3.7"
 

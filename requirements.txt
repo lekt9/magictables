@@ -8,3 +8,7 @@ pre-commit
 polars-lts-cpu
 typing_extensions
 dateparser
+jina
+PyPDF2
+litellm
+pydantic

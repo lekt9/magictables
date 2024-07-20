@@ -14,7 +14,11 @@ setup(
         "polars-lts-cpu",
         "polars",
         "py-test",
+        "jina",
+        "PyPDF2",
+        "litellm",
         "pre-commit",
+        "pydantic",
     ],
     extras_require={
         "dev": ["pytest", "pytest-cov", "black", "isort", "flake8"],

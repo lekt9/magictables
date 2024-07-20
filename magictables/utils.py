@@ -23,6 +23,7 @@ from typing import Any, Callable, List, Dict
 import polars as pl
 import json
 import logging
+from litellm import completion
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
@@ -34,6 +35,12 @@ OPENAI_BASE_URL = os.environ.get(
     "OPENAI_BASE_URL", "https://openrouter.ai/api/v1/chat/completions"
 )
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY")
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai")
 
 
 def generate_schema(data: Union[pl.DataFrame, Dict[str, Any]]) -> Dict[str, str]:
@@ -102,11 +109,28 @@ def ensure_dataframe(result):
 
 
 def call_ai_model(input_data: Dict[str, Any], prompt: str) -> Dict[str, Any]:
-    if not OPENAI_API_KEY:
-        raise ValueError("OpenAI API key is not set in the environment variables.")
+    api_key = None
+    model = None
+
+    if LLM_PROVIDER == "openai":
+        api_key = OPENAI_API_KEY
+        model = "openai/gpt-4o-mini"
+    elif LLM_PROVIDER == "openrouter":
+        api_key = OPENROUTER_API_KEY
+        model = "openrouter/gpt-4o-mini"
+    elif LLM_PROVIDER == "ollama":
+        api_key = OLLAMA_API_KEY
+        model = "ollama/phi3:mini"
+    else:
+        raise ValueError(f"Unsupported LLM provider: {LLM_PROVIDER}")
+
+    if not api_key:
+        raise ValueError(
+            f"API key for {LLM_PROVIDER} is not set in the environment variables."
+        )
 
     headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
 
@@ -121,30 +145,11 @@ def call_ai_model(input_data: Dict[str, Any], prompt: str) -> Dict[str, Any]:
         },
     ]
 
-    data = {
-        "model": OPENAI_MODEL,
-        "messages": messages,
-        "response_format": {"type": "json_object"},
-    }
-
-    logging.debug(f"Sending request to AI model with data: {data}")
-
     try:
-        response = requests.post(OPENAI_BASE_URL, headers=headers, json=data)
-        response.raise_for_status()
-    except requests.exceptions.RequestException as e:
-        error_message = f"API request failed: {str(e)}"
-        logging.error(error_message)
-        raise Exception(error_message)
-
-    response_json = response.json()
-    logging.debug(f"Raw AI model response: {response_json}")
-
-    try:
-        response_content = response_json["choices"][0]["message"]["content"]
+        response = completion(model=model, messages=messages)
+        response_content = response.choices[0].message.content
         if "```json" in response_content:
             json_str = response_content.replace("```json", "```").split("```")[1]
-
         else:
             json_str = response_content
 
@@ -153,6 +158,10 @@ def call_ai_model(input_data: Dict[str, Any], prompt: str) -> Dict[str, Any]:
         return result
     except (KeyError, json.JSONDecodeError) as e:
         error_message = f"Failed to parse API response: {str(e)}"
+        logging.error(error_message)
+        raise Exception(error_message)
+    except requests.exceptions.RequestException as e:
+        error_message = f"API request failed: {str(e)}"
         logging.error(error_message)
         raise Exception(error_message)
 
