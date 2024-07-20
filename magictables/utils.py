@@ -42,6 +42,9 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY")
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai")
 
+os.environ["OR_SITE_URL"] = "https://magictables.ai"  # optional
+os.environ["OR_APP_NAME"] = "MagicTables"  # optional
+
 
 def generate_schema(data: Union[pl.DataFrame, Dict[str, Any]]) -> Dict[str, str]:
     """
@@ -117,7 +120,7 @@ def call_ai_model(input_data: Dict[str, Any], prompt: str) -> Dict[str, Any]:
         model = "openai/gpt-4o-mini"
     elif LLM_PROVIDER == "openrouter":
         api_key = OPENROUTER_API_KEY
-        model = "openrouter/gpt-4o-mini"
+        model = "openrouter/openai/gpt-4o-mini"
     elif LLM_PROVIDER == "ollama":
         api_key = OLLAMA_API_KEY
         model = "ollama/phi3:mini"
