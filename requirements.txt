@@ -5,3 +5,4 @@ dataset
 pandera[polars]
 polars-stubs
 pytest
+pre-commit

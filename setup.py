@@ -11,6 +11,8 @@ setup(
         "dataset",
         "pandera",
         "polars",
+        "py-test",
+        "pre-commit",
     ],
     extras_require={
         "dev": ["pytest", "pytest-cov", "black", "isort", "flake8"],

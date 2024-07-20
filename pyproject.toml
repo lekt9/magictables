@@ -27,6 +27,8 @@ dependencies = [
     "requests",
     "python-dotenv",
     "dataset",
+    "pytest",
+    "pre-commit",
 ]
 requires-python = ">=3.7"
 
