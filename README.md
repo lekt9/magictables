@@ -1,4 +1,3 @@
-
 # MagicTables
 
 MagicTables is a powerful Python library designed for data scientists, API scrapers, and developers working on data pipelines and ETL processes. It creates a shadow queryable database that automatically captures and stores your data, simplifying retrieval, caching, and analysis. With easy-to-use decorators, MagicTables streamlines API integration, web scraping, and data enrichment tasks.
@@ -177,6 +176,22 @@ results = (
     .all()
 )
 ```
+
+## Development Setup
+
+This project uses `pre-commit` to run tests before each commit. To set it up:
+
+1. Install pre-commit:
+   ```
+   pip install pre-commit
+   ```
+
+2. Set up the git hook scripts:
+   ```
+   pre-commit install
+   ```
+
+Now, tests will run automatically before each commit.
 
 ## Best Practices
 
