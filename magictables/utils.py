@@ -330,9 +330,17 @@ def generate_call_id(func: Callable, *args: Any, **kwargs: Any) -> str:
         return hashlib.md5(str(call_data).encode()).hexdigest()
 
 
-def generate_row_id(row: Dict[str, Any]) -> str:
-    row_data = json.dumps(row, sort_keys=True)
-    return hashlib.md5(row_data.encode()).hexdigest()
+def generate_row_id(row):
+    # Check if the row is already a dictionary
+    if isinstance(row, dict):
+        row_dict = row
+    else:
+        # Convert the row to a dictionary if it's a Polars struct
+        row_dict = {name: value for name, value in zip(row.struct_fields, row)}
+
+    # Generate a unique ID based on the row data
+    row_str = json.dumps(row_dict, sort_keys=True)
+    return hashlib.md5(row_str.encode()).hexdigest()
 
 
 def flatten_dataframe(df: pl.DataFrame) -> pl.DataFrame:

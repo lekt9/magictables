@@ -14,6 +14,7 @@ def extract_text_from_pdf(pdf_path):
         text = ""
         for page in reader.pages:
             text += page.extract_text()
+
     return text
 
 
@@ -89,10 +90,15 @@ def magic_input(query: str = None, input_type: str = "pdf"):
                     df = ensure_dataframe(result)
 
                     # Generate row IDs
-                    df = df.with_columns(
-                        pl.struct(df.columns).map_elements(generate_row_id).alias("id")
-                    )
-
+                    if not df.is_empty():
+                        try:
+                            df = df.with_columns(
+                                pl.struct(df.columns).map(generate_row_id).alias("id")
+                            )
+                        except Exception as e:
+                            print(f"Error generating row IDs: {e}")
+                    else:
+                        print("DataFrame is empty, skipping row ID generation")
                     # Add function parameters as columns
                     for arg_name, arg_value in kwargs.items():
                         if isinstance(arg_value, (int, float, str, bool)):
