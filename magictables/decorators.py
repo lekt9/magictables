@@ -4,49 +4,34 @@ import json
 import logging
 import importlib
 from typing import Any, Callable, Optional, Type, Union, List, Dict, TypeVar, cast
+import pandas as pd
 from pandera import DataFrameModel
 import polars as pl
 from pandera.typing import DataFrame as PanderaDataFrame
 from pandera.engines import polars_engine as pa
 from magictables.database import magic_db
-from magictables.utils import ensure_dataframe, call_ai_model, generate_ai_descriptions
+from magictables.utils import (
+    ensure_dataframe,
+    call_ai_model,
+    generate_ai_descriptions,
+    generate_call_id,
+    generate_row_id,
+    load_schema_class,
+)
 
 T = TypeVar("T", bound=Callable[..., Any])
 
 
-def generate_call_id(func: Callable, *args: Any, **kwargs: Any) -> str:
-    def default_serializer(obj):
-        if isinstance(obj, pl.DataFrame):
-            return obj.to_dict(as_series=False)
-        if hasattr(obj, "__dict__"):
-            return obj.__dict__
-        raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
-
-    call_data = (func.__name__, str(args), str(kwargs))
-    try:
-        return hashlib.md5(
-            json.dumps(call_data, sort_keys=True, default=default_serializer).encode()
-        ).hexdigest()
-    except TypeError:
-        # If serialization fails, use a simpler approach
-        return hashlib.md5(str(call_data).encode()).hexdigest()
+def is_pandas_dataframe(df: Any) -> bool:
+    return isinstance(df, pd.DataFrame)
 
 
-def generate_row_id(row: Dict[str, Any]) -> str:
-    row_data = json.dumps(row, sort_keys=True)
-    return hashlib.md5(row_data.encode()).hexdigest()
+def pandas_to_polars(df: pd.DataFrame) -> pl.DataFrame:
+    return pl.from_pandas(df)
 
 
-def load_schema_class(table_name: str) -> Optional[Type[DataFrameModel]]:
-    try:
-        module_name = "magictables.schemas"
-        class_name = f"{table_name.capitalize()}Model"
-        module = importlib.import_module(module_name)
-        schema_class = getattr(module, class_name)
-        return schema_class
-    except (ImportError, AttributeError):
-        logging.warning(f"Schema class {class_name} not found in module {module_name}.")
-        return None
+def polars_to_pandas(df: pl.DataFrame) -> pd.DataFrame:
+    return df.to_pandas()
 
 
 def mtable(func: Optional[Callable] = None) -> Callable[[T], T]:
@@ -63,6 +48,11 @@ def mtable(func: Optional[Callable] = None) -> Callable[[T], T]:
 
             print(f"Cache miss for {f.__name__}")
             result = f(*args, **kwargs)
+
+            input_was_pandas = is_pandas_dataframe(result)
+            if input_was_pandas:
+                result = pandas_to_polars(result)
+
             result_df = ensure_dataframe(result)
 
             # Generate row IDs
@@ -77,6 +67,8 @@ def mtable(func: Optional[Callable] = None) -> Callable[[T], T]:
             if schema_class:
                 result_df = schema_class.validate(result_df)
 
+            if input_was_pandas:
+                return polars_to_pandas(result_df)
             return result_df
 
         return cast(T, wrapper)
@@ -105,6 +97,11 @@ def mai(
 
             logging.info(f"Cache miss for {f.__name__}")
             result = f(*args, **kwargs)
+
+            input_was_pandas = is_pandas_dataframe(result)
+            if input_was_pandas:
+                result = pandas_to_polars(result)
+
             result_df = ensure_dataframe(result)
 
             if result_df.is_empty():
@@ -144,6 +141,8 @@ def mai(
             if schema_class:
                 result_df = schema_class.validate(result_df)
 
+            if input_was_pandas:
+                return polars_to_pandas(result_df)
             return result_df
 
         return cast(T, wrapper)

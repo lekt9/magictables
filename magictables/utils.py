@@ -10,6 +10,18 @@ from dotenv import load_dotenv
 import requests
 from hashlib import md5
 import polars as pl
+import functools
+import hashlib
+import json
+import logging
+import importlib
+from typing import Any, Callable, Optional, Type, Union, List, Dict, TypeVar, cast
+from pandera import DataFrameModel
+import polars as pl
+from pandera.typing import DataFrame as PanderaDataFrame
+from pandera.engines import polars_engine as pa
+from magictables.database import magic_db
+from magictables.utils import ensure_dataframe, call_ai_model, generate_ai_descriptions
 
 load_dotenv()
 
@@ -243,6 +255,36 @@ def generate_default_descriptions(
     }
 
 
+def generate_call_id(func: Callable, *args: Any, **kwargs: Any) -> str:
+    def default_serializer(obj):
+        if isinstance(obj, pl.DataFrame):
+            return obj.to_dict(as_series=False)
+        if hasattr(obj, "__dict__"):
+            return obj.__dict__
+        raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+
+    call_data = (func.__name__, str(args), str(kwargs))
+    try:
+        return hashlib.md5(
+            json.dumps(call_data, sort_keys=True, default=default_serializer).encode()
+        ).hexdigest()
+    except TypeError:
+        # If serialization fails, use a simpler approach
+        return hashlib.md5(str(call_data).encode()).hexdigest()
+
+
 def generate_row_id(row: Dict[str, Any]) -> str:
     row_data = json.dumps(row, sort_keys=True)
     return hashlib.md5(row_data.encode()).hexdigest()
+
+
+def load_schema_class(table_name: str) -> Optional[Type[DataFrameModel]]:
+    try:
+        module_name = "magictables.schemas"
+        class_name = f"{table_name.capitalize()}Model"
+        module = importlib.import_module(module_name)
+        schema_class = getattr(module, class_name)
+        return schema_class
+    except (ImportError, AttributeError):
+        logging.warning(f"Schema class {class_name} not found in module {module_name}.")
+        return None
