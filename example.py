@@ -19,6 +19,7 @@ def get_popular_movies(input_data=None) -> pl.DataFrame:
 @mtable(query="Get movie details including production companies")
 def get_movie_details(movies: pl.DataFrame) -> pl.DataFrame:
     details = []
+    print("movies", movies)
     for movie_id in movies["id"]:
         url = f"https://api.themoviedb.org/3/movie/{movie_id}"
         params = {

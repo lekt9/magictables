@@ -144,23 +144,21 @@ class MagicDB:
                     pass
         return df
 
-    def store_mapping(self, mapping_name: str, mapping: Dict[str, Any]):
+    def store_mapping(self, table_name: str, mapping: dict):
         with self.session_scope() as session:
             table = Table("mappings", self.metadata, autoload_with=self.engine)
             data = {
-                "mapping_name": mapping_name,
+                "table_name": table_name,
                 "mapping": json.dumps(mapping),
             }
             stmt = sqlite_insert(table).values(**data)
-            stmt = stmt.on_conflict_do_update(
-                index_elements=["mapping_name"], set_=data
-            )
+            stmt = stmt.on_conflict_do_update(index_elements=["table_name"], set_=data)
             session.execute(stmt)
 
-    def get_mapping(self, mapping_name: str) -> Optional[Dict[str, Any]]:
+    def get_mapping(self, table_name: str) -> Optional[dict]:
         with self.session_scope() as session:
             table = Table("mappings", self.metadata, autoload_with=self.engine)
-            stmt = select(table).where(table.c.mapping_name == mapping_name)
+            stmt = select(table).where(table.c.table_name == table_name)
             result = session.execute(stmt).fetchone()
             if result:
                 return json.loads(result["mapping"])

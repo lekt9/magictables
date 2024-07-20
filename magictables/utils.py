@@ -2,7 +2,7 @@ import re
 import ast
 import dateparser
 import polars as pl
-from typing import Dict, Any
+from typing import Dict, Any, Union
 import ast
 import hashlib
 import requests
@@ -33,6 +33,35 @@ OPENAI_BASE_URL = os.environ.get(
     "OPENAI_BASE_URL", "https://openrouter.ai/api/v1/chat/completions"
 )
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+
+
+def generate_schema(data: Union[pl.DataFrame, Dict[str, Any]]) -> Dict[str, str]:
+    """
+    Generate a schema representation of a Polars DataFrame or a dictionary.
+
+    Args:
+    data (Union[pl.DataFrame, Dict[str, Any]]): The input DataFrame or dictionary.
+
+    Returns:
+    Dict[str, str]: A dictionary where keys are column names and values are data types.
+    """
+    if isinstance(data, pl.DataFrame):
+        schema = {}
+        for col in data.columns:
+            dtype = data[col].dtype
+            if isinstance(dtype, pl.List):
+                schema[col] = f"List[{dtype.inner}]"
+            elif isinstance(dtype, pl.Struct):
+                schema[col] = (
+                    f"Struct{{{', '.join(f'{k}: {v}' for k, v in dtype.fields.items())}}}"
+                )
+            else:
+                schema[col] = str(dtype)
+        return schema
+    elif isinstance(data, dict):
+        return {key: type(value).__name__ for key, value in data.items()}
+    else:
+        raise ValueError("Input must be a Polars DataFrame or a dictionary")
 
 
 def ensure_dataframe(result: Any) -> pl.DataFrame:
@@ -120,13 +149,11 @@ def call_ai_model(
         try:
             result = json.loads(json_str)
             logging.debug(f"Parsed JSON result: {result}")
-            results.append({"content": result})
+            results.append(result)
         except json.JSONDecodeError as e:
             logging.error(f"Failed to parse JSON response: {json_str}")
             logging.error(f"JSON decode error: {str(e)}")
-            results.append(
-                {"content": json_str}
-            )  # Append the raw string if parsing fails
+            results.append(json_str)  # Append the raw string if parsing fails
 
     logging.debug(f"Final results from call_ai_model: {results}")
     return results
@@ -296,6 +323,18 @@ def generate_call_id(func: Callable, *args: Any, **kwargs: Any) -> str:
 def generate_row_id(row: Dict[str, Any]) -> str:
     row_data = json.dumps(row, sort_keys=True)
     return hashlib.md5(row_data.encode()).hexdigest()
+
+
+def flatten_dataframe(df: pl.DataFrame) -> pl.DataFrame:
+    for col in df.columns:
+        if df[col].dtype == pl.List:
+            df = df.with_columns(pl.col(col).list.to_struct())
+        if df[col].dtype == pl.Struct:
+            df = df.with_columns(
+                pl.col(col).struct.rename_fields(lambda f: f"{col}_{f}")
+            )
+            df = df.unnest(col)
+    return df
 
 
 def transform_data_with_query(
