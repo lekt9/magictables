@@ -1,17 +1,13 @@
+from .database import MagicDB, magic_db
 from .decorators import mtable, mai
-from .query import (
-    execute_sql,
-    get_table_info,
-    SQLQueryBuilder,
-    query_table,
-)
+from .utils import ensure_dataframe, call_ai_model, generate_ai_descriptions
 
 __all__ = [
+    "MagicDB",
+    "magic_db",
     "mtable",
     "mai",
-    "execute_sql",
-    "get_table_info",
-    "SQLQueryBuilder",
-    "query_table",
+    "ensure_dataframe",
+    "call_ai_model",
+    "generate_ai_descriptions",
 ]
-__version__ = "0.2.0"

@@ -1,8 +1,8 @@
+import pandas as pd
 import requests
 import json
 import logging
-from typing import List, Dict, Any, Optional
-from typing import Any, Dict, List, Union
+from typing import List, Dict, Any, Optional, Union
 
 import os
 import re
@@ -17,6 +17,31 @@ OPENAI_BASE_URL = os.environ.get(
     "OPENAI_BASE_URL", "https://openrouter.ai/api/v1/chat/completions"
 )
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+
+
+def ensure_dataframe(result: Any) -> pd.DataFrame:
+    if isinstance(result, pd.DataFrame):
+        return result
+    elif isinstance(result, dict):
+        return pd.DataFrame([result])
+    elif isinstance(result, list):
+        if all(isinstance(item, dict) for item in result):
+            return pd.DataFrame(result)
+        else:
+            try:
+                return pd.DataFrame(result)
+            except ValueError:
+                raise ValueError(
+                    "List items are not consistent for DataFrame conversion."
+                )
+    elif isinstance(result, str):
+        try:
+            json_result = json.loads(result)
+            return ensure_dataframe(json_result)
+        except json.JSONDecodeError:
+            raise ValueError("String input is not valid JSON.")
+    else:
+        return pd.DataFrame({"result": [result]})
 
 
 def call_ai_model(
