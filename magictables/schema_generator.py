@@ -1,10 +1,12 @@
 import dataset
-from typing import List, Dict, Any, Optional
-import polars as pl
-from pandera.engines import polars_engine as pa
+from typing import List, Dict, Any, Optional, Type
 from pandera.typing import DataFrame as PanderaDataFrame
+import os
+import importlib
+import sys
 
 MAGIC_DB = "sqlite:///magic.db"
+SCHEMA_DIR = "schemas"
 
 
 def get_table_schema(table_name: str) -> List[Dict[str, Any]]:
@@ -47,14 +49,12 @@ def generate_pandera_schema(table_name: str) -> str:
         elif "BOOL" in field_type.upper():
             pa_type = "pa.Boolean"
         elif "DATETIME" in field_type.upper():
-            pa_type = "pa.Datetime"
+            pa_type = "pa.DateTime"
         else:
             pa_type = "pa.String"
 
         if not column["nullable"]:
-            model_fields.append(
-                f"    {field_name}: {pa_type} = pa.Field(nullable=False)"
-            )
+            model_fields.append(f"    {field_name}: {pa_type} = pa.Field()")
         else:
             model_fields.append(
                 f"    {field_name}: Optional[{pa_type}] = pa.Field(nullable=True)"
@@ -68,6 +68,7 @@ def generate_pandera_schema(table_name: str) -> str:
 
 class {table_name.capitalize()}Model(pa.DataFrameModel):
     class Config:
+        coerce = True
         engine = polars_engine
 
 {fields_str}
@@ -83,6 +84,33 @@ def generate_schemas_for_all_tables() -> Dict[str, str]:
         schemas[table_name] = generate_pandera_schema(table_name)
 
     return schemas
+
+
+def load_schema_class(table_name: str) -> Optional[Type[PanderaDataFrame]]:
+    module_name = f"{table_name}_schema"
+    try:
+        # Try to import the existing schema
+        module = importlib.import_module(module_name)
+        return getattr(module, f"{table_name.capitalize()}Model")
+    except ImportError:
+        # If the schema doesn't exist, generate it
+        schema_code = generate_pandera_schema(table_name)
+
+        # Ensure the schema directory exists
+        os.makedirs(SCHEMA_DIR, exist_ok=True)
+
+        # Write the schema to a file
+        file_path = os.path.join(SCHEMA_DIR, f"{module_name}.py")
+        with open(file_path, "w") as f:
+            f.write(schema_code)
+
+        # Add the schemas directory to sys.path if it's not already there
+        if SCHEMA_DIR not in sys.path:
+            sys.path.insert(0, SCHEMA_DIR)
+
+        # Import the newly created module
+        module = importlib.import_module(module_name)
+        return getattr(module, f"{table_name.capitalize()}Model")
 
 
 # Generate and save the schemas to a file

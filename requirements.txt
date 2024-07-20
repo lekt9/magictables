@@ -2,6 +2,9 @@ pandas
 requests
 python-dotenv
 dataset
-pandera[polars]
+pandera
 pytest
 pre-commit
+polars-lts-cpu
+typing_extensions
+dateparser

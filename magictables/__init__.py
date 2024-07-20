@@ -1,13 +1,13 @@
 from .database import MagicDB, magic_db
-from .decorators import mtable, mai
-from .utils import ensure_dataframe, call_ai_model, generate_ai_descriptions
+from .decorators import mtable
+from .chain import create_chain
+from .mapping import store_mapping, get_stored_mapping
 
 __all__ = [
     "MagicDB",
     "magic_db",
     "mtable",
-    "mai",
-    "ensure_dataframe",
-    "call_ai_model",
-    "generate_ai_descriptions",
+    "create_chain",
+    "store_mapping",
+    "get_stored_mapping",
 ]

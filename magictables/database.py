@@ -1,7 +1,7 @@
 from contextlib import contextmanager
 import json
 import logging
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 from sqlalchemy import (
     create_engine,
     MetaData,
@@ -9,14 +9,13 @@ from sqlalchemy import (
     Column,
     String,
     select,
-    insert,
-    update,
 )
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-
 import polars as pl
+
+from magictables.utils import generate_row_id
 
 MAGIC_DB = "sqlite:///magic.db"
 
@@ -53,76 +52,6 @@ class MagicDB:
                 ),
             )
             self.metadata.create_all(self.engine)
-
-    def cache_results(self, table_name: str, df: pl.DataFrame, call_id: str) -> None:
-        columns = df.columns
-        self.create_table_if_not_exists(table_name, columns)
-
-        logging.info(f"Caching results for table: {table_name}, call_id: {call_id}")
-        logging.info(f"DataFrame shape: {df.shape}")
-
-        with self.session_scope() as session:
-            table = Table(table_name, self.metadata, autoload_with=self.engine)
-            for row in df.iter_rows(named=True):
-                data = {k: str(v) if v is not None else None for k, v in row.items()}
-                data["call_id"] = call_id
-                try:
-                    stmt = sqlite_insert(table).values(**data)
-                    stmt = stmt.on_conflict_do_update(index_elements=["id"], set_=data)
-                    session.execute(stmt)
-                    logging.info(f"Inserted/Updated row for {table_name}")
-                except SQLAlchemyError as e:
-                    logging.error(f"Error upserting row: {e}")
-                    logging.error(f"Row data: {data}")
-
-        logging.info(f"Finished caching results for {table_name}")
-
-    def get_cached_result(
-        self, table_name: str, call_id: str
-    ) -> Optional[pl.DataFrame]:
-        if not self.engine.has_table(table_name):
-            return None
-
-        with self.session_scope() as session:
-            table = Table(table_name, self.metadata, autoload_with=self.engine)
-            stmt = select(table).where(table.c.call_id == call_id)
-            result = session.execute(stmt)
-
-            # Fetch all rows and column names
-            rows = result.fetchall()
-            column_names = result.keys()
-
-            # Debug logging
-            logging.debug(f"Fetched {len(rows)} rows from {table_name}")
-            logging.debug(f"Column names: {column_names}")
-            if rows:
-                logging.debug(f"First row: {rows[0]}")
-
-            # Create DataFrame more robustly
-            try:
-                df = pl.DataFrame(
-                    {
-                        col: [row[i] for row in rows]
-                        for i, col in enumerate(column_names)
-                    }
-                )
-            except Exception as e:
-                logging.error(f"Error creating DataFrame: {e}")
-                logging.error(f"Data: {rows}")
-                logging.error(f"Columns: {column_names}")
-                return None
-
-        if df.is_empty():
-            return None
-
-        df = df.drop("call_id")
-
-        # Convert numeric columns back to appropriate types
-        for col in df.columns:
-            if col not in ["id", "call_id"]:
-                df = df.with_columns(pl.col(col).cast(pl.Float64, strict=False))
-
-        return df
 
     def check_cache_and_get_new_items(
         self, table_name: str, batch: List[Dict[str, Any]], keys: List[str]
@@ -215,5 +144,89 @@ class MagicDB:
                     pass
         return df
 
+    def store_mapping(self, mapping_name: str, mapping: Dict[str, Any]):
+        with self.session_scope() as session:
+            table = Table("mappings", self.metadata, autoload_with=self.engine)
+            data = {
+                "mapping_name": mapping_name,
+                "mapping": json.dumps(mapping),
+            }
+            stmt = sqlite_insert(table).values(**data)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["mapping_name"], set_=data
+            )
+            session.execute(stmt)
+
+    def get_mapping(self, mapping_name: str) -> Optional[Dict[str, Any]]:
+        with self.session_scope() as session:
+            table = Table("mappings", self.metadata, autoload_with=self.engine)
+            stmt = select(table).where(table.c.mapping_name == mapping_name)
+            result = session.execute(stmt).fetchone()
+            if result:
+                return json.loads(result["mapping"])
+            return None
+
+    def cache_results(self, table_name: str, df: pl.DataFrame, call_id: str) -> None:
+        columns = df.columns
+        self.create_table_if_not_exists(table_name, columns)
+
+        logging.info(f"Caching results for table: {table_name}, call_id: {call_id}")
+        logging.info(f"DataFrame shape: {df.shape}")
+
+        with self.session_scope() as session:
+            table = Table(table_name, self.metadata, autoload_with=self.engine)
+            for row in df.iter_rows(named=True):
+                data = {k: str(v) if v is not None else None for k, v in row.items()}
+                data["call_id"] = call_id
+                data["id"] = generate_row_id(data)  # Generate a unique id for each row
+                try:
+                    stmt = sqlite_insert(table).values(**data)
+                    stmt = stmt.on_conflict_do_update(index_elements=["id"], set_=data)
+                    session.execute(stmt)
+                    logging.info(f"Inserted/Updated row for {table_name}")
+                except SQLAlchemyError as e:
+                    logging.error(f"Error upserting row: {e}")
+                    logging.error(f"Row data: {data}")
+
+        logging.info(f"Finished caching results for {table_name}")
+
+    def get_cached_result(
+        self, table_name: str, call_id: str
+    ) -> Optional[pl.DataFrame]:
+        if not self.engine.has_table(table_name):
+            return None
+
+        with self.session_scope() as session:
+            table = Table(table_name, self.metadata, autoload_with=self.engine)
+            stmt = select(table).where(table.c.call_id == call_id)
+            result = session.execute(stmt)
+
+            rows = result.fetchall()
+            column_names = result.keys()
+
+            if not rows:
+                return None
+
+            df = pl.DataFrame(
+                {col: [row[i] for row in rows] for i, col in enumerate(column_names)}
+            )
+
+        df = df.drop("call_id")
+
+        # Convert numeric columns back to appropriate types
+        for col in df.columns:
+            if col not in ["id", "call_id"]:
+                df = df.with_columns(pl.col(col).cast(pl.Float64, strict=False))
+
+        return df
+
 
 magic_db = MagicDB()
+
+
+def cache_mapping(func_name: str, mapping: Dict[str, Any]):
+    magic_db.store_mapping(func_name, mapping)
+
+
+def retrieve_mapping(func_name: str) -> Optional[Dict[str, Any]]:
+    return magic_db.get_mapping(func_name)
