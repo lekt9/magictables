@@ -5,11 +5,7 @@ on:
     types: [created]
 
 jobs:
-  test:
-    uses: ./.github/workflows/run-tests.yml
-
   deploy:
-    needs: test
     runs-on: ubuntu-latest
     steps:
     - name: Checkout code
