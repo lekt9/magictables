@@ -308,10 +308,10 @@ def transform_data_with_query(
     And the following query:
     "{query}"
 
-    Generate a series of Polars expressions to transform the DataFrame according to the query and the desired output schema:
+    Generate a single Polars expression to transform the DataFrame according to the query and the desired output schema:
     {output_schema}
 
-    Respond with a JSON array of strings, where each string is a valid Polars expression.
+    Respond with a single string containing a valid Polars expression.
     """
 
     transformation_result = call_ai_model(
@@ -319,14 +319,14 @@ def transform_data_with_query(
     )
     content = transformation_result[0].get("content", {})
     if isinstance(content, dict):
-        transformations = content.get("content", [])
+        transformation = content.get("content", "")
     else:
-        transformations = json.loads(content) if isinstance(content, str) else []
-    for transform in transformations:
-        try:
-            df = eval(transform)
-        except Exception as e:
-            print(f"Error applying transformation '{transform}': {str(e)}")
+        transformation = content if isinstance(content, str) else ""
+
+    try:
+        df = eval(transformation)
+    except Exception as e:
+        print(f"Error applying transformation '{transformation}': {str(e)}")
 
     # Ensure the output matches the specified schema
     for col, dtype in output_schema.items():
