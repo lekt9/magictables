@@ -8,7 +8,11 @@ setup(
         "pandas",
         "requests",
         "python-dotenv",
+        "dataset",
     ],
+    extras_require={
+        "dev": ["pytest", "pytest-cov", "black", "isort", "flake8"],
+    },
     description="""
 MagicTables is a Python library that provides easy-to-use decorators for caching API responses and augmenting function calls with AI-generated data. It's designed to simplify data retrieval and manipulation tasks in your Python projects.
 """,
