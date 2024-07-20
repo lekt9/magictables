@@ -1,3 +1,4 @@
+import hashlib
 import pandas as pd
 import requests
 import json
@@ -240,3 +241,8 @@ def generate_default_descriptions(
             column: f"Column in {table_name} table." for column in columns
         },
     }
+
+
+def generate_row_id(row: Dict[str, Any]) -> str:
+    row_data = json.dumps(row, sort_keys=True)
+    return hashlib.md5(row_data.encode()).hexdigest()
