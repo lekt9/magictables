@@ -21,7 +21,6 @@ import polars as pl
 from pandera.typing import DataFrame as PanderaDataFrame
 from pandera.engines import polars_engine as pa
 from magictables.database import magic_db
-from magictables.utils import ensure_dataframe, call_ai_model, generate_ai_descriptions
 
 load_dotenv()
 
