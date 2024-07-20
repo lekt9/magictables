@@ -14,6 +14,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 import polars as pl
+from sqlalchemy import Table, Column, String, JSON
 
 from magictables.utils import generate_row_id
 
@@ -144,7 +145,18 @@ class MagicDB:
                     pass
         return df
 
+    def ensure_mappings_table_exists(self):
+        if not self.engine.has_table("mappings"):
+            mappings_table = Table(
+                "mappings",
+                self.metadata,
+                Column("table_name", String, primary_key=True),
+                Column("mapping", JSON),
+            )
+            self.metadata.create_all(self.engine, tables=[mappings_table])
+
     def store_mapping(self, table_name: str, mapping: dict):
+        self.ensure_mappings_table_exists()
         with self.session_scope() as session:
             table = Table("mappings", self.metadata, autoload_with=self.engine)
             data = {
@@ -156,6 +168,7 @@ class MagicDB:
             session.execute(stmt)
 
     def get_mapping(self, table_name: str) -> Optional[dict]:
+        self.ensure_mappings_table_exists()
         with self.session_scope() as session:
             table = Table("mappings", self.metadata, autoload_with=self.engine)
             stmt = select(table).where(table.c.table_name == table_name)

@@ -18,7 +18,7 @@ import polars as pl
 import hashlib
 import json
 import logging
-from typing import Any, Callable, Optional, List, Dict
+from typing import Any, Callable, List, Dict
 import polars as pl
 import json
 import logging
@@ -64,99 +64,74 @@ def generate_schema(data: Union[pl.DataFrame, Dict[str, Any]]) -> Dict[str, str]
         raise ValueError("Input must be a Polars DataFrame or a dictionary")
 
 
-def ensure_dataframe(result: Any) -> pl.DataFrame:
-    if isinstance(result, pl.DataFrame):
-        return result
-    elif isinstance(result, dict):
-        return pl.DataFrame([result])
-    elif isinstance(result, list):
-        if all(isinstance(item, dict) for item in result):
-            return pl.DataFrame(result)
+def ensure_dataframe(data: Any) -> pl.DataFrame:
+    if isinstance(data, pl.DataFrame):
+        return data
+    elif isinstance(data, dict):
+        return pl.DataFrame([data])
+    elif isinstance(data, list):
+        if all(isinstance(item, dict) for item in data):
+            return pl.DataFrame(data)
         else:
-            try:
-                return pl.DataFrame(result)
-            except ValueError:
-                raise ValueError(
-                    "List items are not consistent for DataFrame conversion."
-                )
-    elif isinstance(result, str):
-        try:
-            json_result = json.loads(result)
-            return ensure_dataframe(json_result)
-        except json.JSONDecodeError:
-            raise ValueError("String input is not valid JSON.")
+            return pl.DataFrame({"data": data})
     else:
-        return pl.DataFrame({"result": [result]})
+        return pl.DataFrame({"data": [data]})
 
 
-def call_ai_model(
-    new_items: List[Dict[str, Any]], query: Optional[str] = None
-) -> List[Dict[str, Any]]:
+def call_ai_model(input_data: Dict[str, Any], prompt: str) -> Dict[str, Any]:
+    if not OPENAI_API_KEY:
+        raise ValueError("OpenAI API key is not set in the environment variables.")
+
     headers = {
         "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json",
     }
 
-    results = []
-    for item in new_items:
-        prompt = (
-            f"You are the all knowing JSON generator. Given the function arguments, "
-            f"Create a JSON object that populates the missing, or incomplete columns for the function call."
-            f"The current keys are: {json.dumps(item)}\n, you MUST only use these keys in the JSON you respond."
-            f"Respond with it wrapped in ```json code block with a flat unnested JSON"
-        )
-        if query:
-            prompt += f"\n\nQuery: {query}"
+    messages = [
+        {
+            "role": "system",
+            "content": "You are a JSON generator. Generate JSON based on the given input data and prompt. Wrap it in a ```json code block, and NEVER send anything else",
+        },
+        {
+            "role": "user",
+            "content": f"Input data: {json.dumps(input_data)}\n\nPrompt: {prompt}\n\nGenerate a JSON response based on this input and prompt.",
+        },
+    ]
 
-        data = {
-            "model": OPENAI_MODEL,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
-            ],
-            "response_format": {"type": "json_object"},
-        }
+    data = {
+        "model": OPENAI_MODEL,
+        "messages": messages,
+        "response_format": {"type": "json_object"},
+    }
 
-        logging.debug(f"Sending request to AI model with data: {data}")
+    logging.debug(f"Sending request to AI model with data: {data}")
 
-        # Call OpenAI/OpenRouter API
-        response = requests.post(
-            url=OPENAI_BASE_URL, headers=headers, data=json.dumps(data)
-        )
+    try:
+        response = requests.post(OPENAI_BASE_URL, headers=headers, json=data)
+        response.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        error_message = f"API request failed: {str(e)}"
+        logging.error(error_message)
+        raise Exception(error_message)
 
-        if response.status_code != 200:
-            error_message = f"OpenAI API request failed with status code {response.status_code}: {response.text}"
-            logging.error(error_message)
-            raise Exception(error_message)
+    response_json = response.json()
+    logging.debug(f"Raw AI model response: {response_json}")
 
-        response_json = response.json()
-        logging.debug(f"Raw AI model response: {response_json}")
-
+    try:
         response_content = response_json["choices"][0]["message"]["content"]
-        logging.debug(f"AI model response content: {response_content}")
-
         if "```json" in response_content:
-            # Extract JSON from the response
-            json_start = response_content.find("```json") + 7
-            json_end = response_content.rfind("```")
-            json_str = response_content[json_start:json_end].strip()
+            json_str = response_content.replace("```json", "```").split("```")[1]
+
         else:
             json_str = response_content
 
-        logging.debug(f"Extracted JSON string: {json_str}")
-
-        try:
-            result = json.loads(json_str)
-            logging.debug(f"Parsed JSON result: {result}")
-            results.append(result)
-        except json.JSONDecodeError as e:
-            logging.error(f"Failed to parse JSON response: {json_str}")
-            logging.error(f"JSON decode error: {str(e)}")
-            results.append(json_str)  # Append the raw string if parsing fails
-
-    logging.debug(f"Final results from call_ai_model: {results}")
-    return results
+        result = json.loads(json_str)
+        logging.debug(f"Parsed JSON result: {result}")
+        return result
+    except (KeyError, json.JSONDecodeError) as e:
+        error_message = f"Failed to parse API response: {str(e)}"
+        logging.error(error_message)
+        raise Exception(error_message)
 
 
 def create_key(func_name, args, kwargs):
@@ -326,20 +301,67 @@ def generate_row_id(row: Dict[str, Any]) -> str:
 
 
 def flatten_dataframe(df: pl.DataFrame) -> pl.DataFrame:
+    print("df", df)
     for col in df.columns:
         if df[col].dtype == pl.List:
             df = df.with_columns(pl.col(col).list.to_struct())
         if df[col].dtype == pl.Struct:
             df = df.with_columns(
-                pl.col(col).struct.rename_fields(lambda f: f"{col}_{f}")
+                pl.col(col).struct.rename_fields(
+                    [f"{col}_{f}" for f in df[col].struct.fields]
+                )
             )
             df = df.unnest(col)
     return df
 
 
+def generate_ai_mapping(df: pl.DataFrame, required_params: List[str]) -> Dict[str, str]:
+    df_info = {
+        "current_schema": {
+            col: str(dtype) for col, dtype in zip(df.columns, df.dtypes)
+        },
+        "query": f"Map columns to required parameters: {', '.join(required_params)}",
+        "next_function_params": {param: "Unknown" for param in required_params},
+    }
+
+    prompt = """
+    Given the current DataFrame schema, the query, and the parameters required by the next function in the chain,
+    generate a mapping to transform the Polars DataFrame. 
+    The mapping should be a dictionary where:
+    - Keys are the desired column names (matching the next function's parameters if possible)
+    - Values are Python expressions using the current column names and Polars functions
+
+    You can use any Polars functions or Python operations. For example:
+    - "new_col": "pl.col('existing_col') * 2"
+    - "combined": "pl.col('col1') + ' ' + pl.col('col2')"
+    - "transformed": "pl.when(pl.col('col') > 10).then(pl.lit('High')).otherwise(pl.lit('Low'))"
+
+    Ensure that the mapping includes all required parameters for the next function.
+    If a required parameter is not directly available, try to derive it from existing columns.
+
+    Return the mapping as a Python dictionary.
+    """
+
+    ai_response = call_ai_model(df_info, prompt)
+
+    if isinstance(ai_response, list) and len(ai_response) > 0:
+        mapping = ai_response[0].get("mapping", {})
+    else:
+        mapping = {}
+
+    logging.info(f"AI-generated mapping: {mapping}")
+    return mapping
+
+
 def transform_data_with_query(
     df: pl.DataFrame, query: str, func_name: str, output_schema: Dict[str, str]
 ) -> pl.DataFrame:
+    df_info = {
+        "schema": df.schema,
+        "func_name": func_name,
+        "output_schema": output_schema,
+    }
+
     transformation_prompt = f"""
     Given the following DataFrame schema:
     {df.schema}
@@ -353,10 +375,9 @@ def transform_data_with_query(
     Respond with a single string containing a valid Polars expression.
     """
 
-    transformation_result = call_ai_model(
-        [{"role": "user", "content": transformation_prompt}]
-    )
-    content = transformation_result[0].get("content", {})
+    transformation_result = call_ai_model([df_info], query=transformation_prompt)
+    content = transformation_result[0]
+
     if isinstance(content, dict):
         transformation = content.get("content", "")
     else:
@@ -478,3 +499,25 @@ def apply_transformation(df: pl.DataFrame, transformation: str) -> pl.DataFrame:
         logger.warning(f"Unknown transformation: {transformation}")
         logger.debug(f"Current DataFrame: {df}")
     return df
+
+
+def apply_mapping(df: pl.DataFrame, mapping: Dict[str, Any]) -> pl.DataFrame:
+    valid_mappings = {}
+    for new_col, expr in mapping.items():
+        try:
+            valid_mappings[new_col] = eval(expr)
+        except Exception as e:
+            logging.warning(
+                f"Skipping invalid mapping for '{new_col}': {expr}. Error: {str(e)}"
+            )
+
+    if not valid_mappings:
+        return df
+
+    try:
+        return df.with_columns(
+            [expr.alias(new_col) for new_col, expr in valid_mappings.items()]
+        )
+    except Exception as e:
+        logging.error(f"Error applying mappings: {str(e)}")
+        return df

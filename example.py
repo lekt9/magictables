@@ -1,116 +1,71 @@
 import requests
 from magictables import mtable, create_chain
-import polars as pl
 
 API_KEY = "1865f43a0549ca50d341dd9ab8b29f49"
 
 
-# Step 1: Fetch popular movies from TMDB
 @mtable(query="Get popular movies with their id, title, and release date")
-def get_popular_movies(input_data=None) -> pl.DataFrame:
+def get_popular_movies(input_data=None):
     url = "https://api.themoviedb.org/3/movie/popular"
     params = {"api_key": API_KEY}
     response = requests.get(url, params=params)
-    data = response.json()["results"][:5]  # Limit to 5 movies for this example
-    return pl.DataFrame(data)
+    return response.json()
 
 
-# Step 2: Fetch movie details including production companies
 @mtable(query="Get movie details including production companies")
-def get_movie_details(movies: pl.DataFrame) -> pl.DataFrame:
-    details = []
-    print("movies", movies)
-    for movie_id in movies["id"]:
-        url = f"https://api.themoviedb.org/3/movie/{movie_id}"
-        params = {
-            "api_key": API_KEY
-        }  # This is a dummy key, replace with a real one if needed
-        response = requests.get(url, params=params)
-        details.append(response.json())
-    return pl.DataFrame(details)
+def get_movie_details(movie_id: int):
+    url = f"https://api.themoviedb.org/3/movie/{movie_id}"
+    params = {"api_key": API_KEY}
+    response = requests.get(url, params=params)
+    return response.json()
 
 
-# Step 3: Fetch company details
 @mtable(query="Get company details including origin country")
-def get_company_details(movies: pl.DataFrame) -> pl.DataFrame:
-    company_ids = set()
-    for companies in movies["production_companies"]:
-        company_ids.update(company["id"] for company in companies)
-
-    details = []
-    for company_id in company_ids:
-        url = f"https://api.themoviedb.org/3/company/{company_id}"
-        params = {
-            "api_key": API_KEY
-        }  # This is a dummy key, replace with a real one if needed
-        response = requests.get(url, params=params)
-        details.append(response.json())
-    return pl.DataFrame(details)
+def get_company_details(company_id: int):
+    url = f"https://api.themoviedb.org/3/company/{company_id}"
+    params = {"api_key": API_KEY}
+    response = requests.get(url, params=params)
+    return response.json()
 
 
-# Step 4: Fetch country details
 @mtable(query="Get country details including population and capital")
-def get_country_details(companies: pl.DataFrame) -> pl.DataFrame:
-    country_codes = companies["origin_country"].unique().to_list()
-    details = []
-    for country_code in country_codes:
-        url = f"https://restcountries.com/v3.1/alpha/{country_code}"
-        response = requests.get(url)
-        details.append(response.json()[0])
-    return pl.DataFrame(details)
+def get_country_details(origin_country: str):
+    url = f"https://restcountries.com/v3.1/alpha/{origin_country}"
+    response = requests.get(url)
+    return response.json()
 
 
-# Step 5: Generate insights
 @mtable(
     query="Generate insights about movies, production companies, and their countries"
 )
-def generate_insights(data: pl.DataFrame) -> pl.DataFrame:
-    insights = []
-    for movie in data.to_dicts():
-        insight = f"The movie '{movie['title']}' was produced by "
-        companies = [company["name"] for company in movie["production_companies"]]
-        insight += ", ".join(companies[:-1]) + f" and {companies[-1]}. "
-        for company in movie["production_companies"]:
-            country = company["origin_country"]
-            if country in data["countries"].column("cca2"):
-                country_info = (
-                    data["countries"].filter(pl.col("cca2") == country).to_dicts()[0]
-                )
-                insight += (
-                    f"{company['name']} is based in {country_info['name']['common']}, "
-                )
-                insight += f"which has a population of {country_info['population']} "
-                insight += f"and its capital is {country_info['capital'][0]}. "
-        insights.append({"movie": movie["title"], "insight": insight})
-    return pl.DataFrame(insights)
+def generate_insights(movie, companies, countries):
+    insight = f"The movie '{movie['title']}' was produced by "
+    company_names = [company["name"] for company in companies]
+    insight += ", ".join(company_names[:-1]) + f" and {company_names[-1]}. "
+
+    for company in companies:
+        country = countries.get(company["origin_country"])
+        if country:
+            insight += f"{company['name']} is based in {country['name']['common']}, "
+            insight += f"which has a population of {country['population']} "
+            insight += f"and its capital is {country['capital'][0]}. "
+
+    return {"movie": movie["title"], "insight": insight}
 
 
 def main():
-    # Create a chain of functions using create_chain
     movie_analysis_chain = create_chain(
         get_popular_movies,
         get_movie_details,
         get_company_details,
-        get_country_details,
-        generate_insights,
+        # generate_insights,
     )
 
-    # Execute the chain
     print("Executing Movie Analysis chain:")
-    result = movie_analysis_chain.execute(
-        {}
-    )  # Pass an empty dictionary as initial input
-
-    # Display results
-    print("\nAnalysis Results:")
-    for insight in result.to_dicts():
-        print(f"\nMovie: {insight['movie']}")
-        print(f"Insight: {insight['insight']}")
+    result = movie_analysis_chain.execute({})
 
     print("\nSecond execution (cache hit expected):")
-    result2 = movie_analysis_chain.execute(
-        {}
-    )  # Pass an empty dictionary as initial input
+    result2 = movie_analysis_chain.execute({})
     print("Cache hit successful" if result.equals(result2) else "Cache miss")
 
 
