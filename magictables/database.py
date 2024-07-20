@@ -53,6 +53,17 @@ class MagicDB:
                 ),
             )
             self.metadata.create_all(self.engine)
+        else:
+            # If the table exists, add any new columns
+            with self.engine.connect() as connection:
+                existing_columns = [
+                    c.name for c in self.metadata.tables[table_name].columns
+                ]
+                for col in columns:
+                    if col not in existing_columns and col not in ["id", "call_id"]:
+                        connection.execute(
+                            f"ALTER TABLE {table_name} ADD COLUMN {col} STRING"
+                        )
 
     def check_cache_and_get_new_items(
         self, table_name: str, batch: List[Dict[str, Any]], keys: List[str]
@@ -192,7 +203,10 @@ class MagicDB:
                 data["id"] = generate_row_id(data)  # Generate a unique id for each row
                 try:
                     stmt = sqlite_insert(table).values(**data)
-                    stmt = stmt.on_conflict_do_update(index_elements=["id"], set_=data)
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=["id"],
+                        set_={col: stmt.excluded[col] for col in data.keys()},
+                    )
                     session.execute(stmt)
                     logging.info(f"Inserted/Updated row for {table_name}")
                 except SQLAlchemyError as e:
