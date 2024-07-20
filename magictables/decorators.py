@@ -2,10 +2,12 @@ import functools
 import hashlib
 import json
 import logging
-from typing import Any, Callable, Optional, Union, List, Dict, TypeVar, cast
-
-import pandas as pd
-
+import importlib
+from typing import Any, Callable, Optional, Type, Union, List, Dict, TypeVar, cast
+from pandera import DataFrameModel
+import polars as pl
+from pandera.typing import DataFrame as PanderaDataFrame
+from pandera.engines import polars_engine as pa
 from magictables.database import magic_db
 from magictables.utils import ensure_dataframe, call_ai_model, generate_ai_descriptions
 
@@ -14,8 +16,8 @@ T = TypeVar("T", bound=Callable[..., Any])
 
 def generate_call_id(func: Callable, *args: Any, **kwargs: Any) -> str:
     def default_serializer(obj):
-        if isinstance(obj, pd.DataFrame):
-            return obj.to_dict(orient="records")
+        if isinstance(obj, pl.DataFrame):
+            return obj.to_dict(as_series=False)
         if hasattr(obj, "__dict__"):
             return obj.__dict__
         raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
@@ -30,13 +32,25 @@ def generate_call_id(func: Callable, *args: Any, **kwargs: Any) -> str:
         return hashlib.md5(str(call_data).encode()).hexdigest()
 
 
-def generate_row_id(row: Union[Dict[str, Any], pd.Series]) -> str:
-    if isinstance(row, pd.Series):
+def generate_row_id(row: Union[Dict[str, Any], pl.Series]) -> str:
+    if isinstance(row, pl.Series):
         row_dict = row.to_dict()
     else:
         row_dict = row
     row_data = json.dumps(row_dict, sort_keys=True, default=str)
     return hashlib.md5(row_data.encode()).hexdigest()
+
+
+def load_schema_class(table_name: str) -> Optional[Type[DataFrameModel]]:
+    try:
+        module_name = "magictables.schemas"
+        class_name = f"{table_name.capitalize()}Model"
+        module = importlib.import_module(module_name)
+        schema_class = getattr(module, class_name)
+        return schema_class
+    except (ImportError, AttributeError):
+        logging.warning(f"Schema class {class_name} not found in module {module_name}.")
+        return None
 
 
 def mtable(func: Optional[Callable] = None) -> Callable[[T], T]:
@@ -47,7 +61,7 @@ def mtable(func: Optional[Callable] = None) -> Callable[[T], T]:
             table_name = f"magic_{f.__name__}"
 
             cached_result = magic_db.get_cached_result(table_name, call_id)
-            if cached_result is not None and not cached_result.empty:
+            if cached_result is not None and not cached_result.is_empty():
                 print(f"Cache hit for {f.__name__}")
                 return cached_result
 
@@ -56,9 +70,16 @@ def mtable(func: Optional[Callable] = None) -> Callable[[T], T]:
             result_df = ensure_dataframe(result)
 
             # Generate row IDs
-            result_df["id"] = result_df.apply(generate_row_id, axis=1)
+            result_df = result_df.with_columns(
+                pl.struct(result_df.columns).apply(generate_row_id).alias("id")
+            )
 
             magic_db.cache_results(table_name, result_df, call_id)
+
+            # Apply Pandera schema validation
+            schema_class = load_schema_class(table_name)
+            if schema_class:
+                result_df = schema_class.validate(result_df)
 
             return result_df
 
@@ -82,7 +103,7 @@ def mai(
 
             logging.info(f"Checking cache for {f.__name__} with call_id: {call_id}")
             cached_result = magic_db.get_cached_result(table_name, call_id)
-            if cached_result is not None and not cached_result.empty:
+            if cached_result is not None and not cached_result.is_empty():
                 logging.info(f"Cache hit for {f.__name__}")
                 return cached_result
 
@@ -90,14 +111,16 @@ def mai(
             result = f(*args, **kwargs)
             result_df = ensure_dataframe(result)
 
-            if result_df.empty:
+            if result_df.is_empty():
                 logging.warning(f"Empty DataFrame returned by {f.__name__}")
                 return result_df
 
             # Generate row IDs
-            result_df["id"] = result_df.apply(generate_row_id, axis=1)
+            result_df = result_df.with_columns(
+                pl.struct(result_df.columns).apply(generate_row_id).alias("id")
+            )
 
-            data = result_df.to_dict("records")
+            data = result_df.to_dict(as_series=False)
             logging.info(f"Processing batches for {f.__name__}")
             ai_results = process_batches(table_name, data, batch_size, query)
 
@@ -108,7 +131,7 @@ def mai(
             logging.info(f"Combining results for {f.__name__}")
             result_df = combine_results(result_df, ai_results, mode, query)
 
-            if result_df.empty:
+            if result_df.is_empty():
                 logging.warning(
                     f"combine_results returned an empty DataFrame for {f.__name__}"
                 )
@@ -118,7 +141,12 @@ def mai(
             magic_db.cache_results(table_name, result_df, call_id)
 
             logging.info(f"Generating AI descriptions for {f.__name__}")
-            generate_ai_descriptions(table_name, result_df.columns.tolist())
+            generate_ai_descriptions(table_name, result_df.columns)
+
+            # Apply Pandera schema validation
+            schema_class = load_schema_class(table_name)
+            if schema_class:
+                result_df = schema_class.validate(result_df)
 
             return result_df
 
@@ -142,28 +170,29 @@ def process_batches(
 
 
 def combine_results(
-    original_df: pd.DataFrame,
+    original_df: pl.DataFrame,
     ai_results: List[Dict[str, Any]],
     mode: str,
     query: Optional[str],
-) -> pd.DataFrame:
+) -> pl.DataFrame:
     if mode == "generate":
-        new_rows = pd.DataFrame(ai_results)
-        if new_rows.empty:
+        new_rows = pl.DataFrame(ai_results)
+        if new_rows.is_empty():
             logging.warning("AI generated an empty DataFrame in 'generate' mode")
             return original_df
-        return pd.concat([original_df, new_rows], ignore_index=True)
+        return pl.concat([original_df, new_rows])
     elif mode == "augment":
-        result_df = original_df.copy()
+        result_df = original_df.clone()
         ai_results = ai_results[: len(result_df)]
         for i, ai_result in enumerate(ai_results):
             for key, value in ai_result.items():
                 if key in result_df.columns:
-                    if value is not None and pd.notna(value):
-                        result_df.at[i, key] = value
+                    if value is not None and not pl.Series([value]).is_null().any():
+                        result_df = result_df.with_columns(
+                            pl.col(key).set_at_idx(i, value)
+                        )
                 else:
-                    result_df[key] = None
-                    result_df.at[i, key] = value
-        return result_df
+                    result_df = result_df.with_columns(pl.lit(None).alias(key))
+                    result_df = result_df.with_columns(pl.col(key).set_at_idx(i, value))
     else:
         raise ValueError("Invalid mode. Must be either 'generate' or 'augment'")

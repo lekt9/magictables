@@ -22,6 +22,7 @@ classifiers = [
 keywords = ["cache", "api", "ai", "decorator", "etl"]
 dependencies = [
     "pandas",
+    "pandera",
     "requests",
     "python-dotenv",
     "dataset",

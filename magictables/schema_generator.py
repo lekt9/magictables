@@ -1,5 +1,8 @@
 import dataset
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
+import polars as pl
+from pandera.engines import polars_engine as pa
+from pandera.typing import DataFrame as PanderaDataFrame
 
 MAGIC_DB = "sqlite:///magic.db"
 
@@ -21,32 +24,41 @@ def get_table_schema(table_name: str) -> List[Dict[str, Any]]:
     return schema
 
 
-def generate_pydantic_model(table_name: str) -> str:
+def generate_pandera_schema(table_name: str) -> str:
     schema = get_table_schema(table_name)
 
     model_fields = []
-    imports = set(["from pydantic import BaseModel"])
+    imports = set(
+        [
+            "import pandera as pa",
+            "from pandera.typing import DataFrame",
+            "from pandera.engines import polars_engine",
+        ]
+    )
 
     for column in schema:
         field_name = column["name"]
         field_type = column["type"]
 
         if "INT" in field_type.upper():
-            py_type = "int"
+            pa_type = "pa.Int64"
         elif "FLOAT" in field_type.upper() or "REAL" in field_type.upper():
-            py_type = "float"
+            pa_type = "pa.Float64"
         elif "BOOL" in field_type.upper():
-            py_type = "bool"
+            pa_type = "pa.Boolean"
         elif "DATETIME" in field_type.upper():
-            py_type = "datetime.datetime"
-            imports.add("import datetime")
+            pa_type = "pa.Datetime"
         else:
-            py_type = "str"
+            pa_type = "pa.String"
 
         if not column["nullable"]:
-            model_fields.append(f"    {field_name}: {py_type}")
+            model_fields.append(
+                f"    {field_name}: {pa_type} = pa.Field(nullable=False)"
+            )
         else:
-            model_fields.append(f"    {field_name}: Optional[{py_type}] = None")
+            model_fields.append(
+                f"    {field_name}: Optional[{pa_type}] = pa.Field(nullable=True)"
+            )
             imports.add("from typing import Optional")
 
     imports_str = "\n".join(sorted(imports))
@@ -54,17 +66,29 @@ def generate_pydantic_model(table_name: str) -> str:
 
     model = f"""{imports_str}
 
-class {table_name.capitalize()}Model(BaseModel):
+class {table_name.capitalize()}Model(pa.DataFrameModel):
+    class Config:
+        engine = polars_engine
+
 {fields_str}
 """
     return model
 
 
-def generate_models_for_all_tables() -> Dict[str, str]:
+def generate_schemas_for_all_tables() -> Dict[str, str]:
     db = dataset.connect(MAGIC_DB)
-    models = {}
+    schemas = {}
 
     for table_name in db.tables:
-        models[table_name] = generate_pydantic_model(table_name)
+        schemas[table_name] = generate_pandera_schema(table_name)
 
-    return models
+    return schemas
+
+
+# Generate and save the schemas to a file
+schemas = generate_schemas_for_all_tables()
+
+with open("schemas.py", "w") as f:
+    for schema_code in schemas.values():
+        f.write(schema_code)
+        f.write("\n\n")

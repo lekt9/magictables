@@ -9,6 +9,7 @@ setup(
         "requests",
         "python-dotenv",
         "dataset",
+        "pandera",
     ],
     extras_require={
         "dev": ["pytest", "pytest-cov", "black", "isort", "flake8"],
