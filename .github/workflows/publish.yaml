@@ -5,9 +5,12 @@ on:
     types: [created]
 
 jobs:
-  deploy:
-    runs-on: ubuntu-latest
+  test:
+    uses: ./.github/workflows/run-tests.yml
 
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
     steps:
     - name: Checkout code
       uses: actions/checkout@v2

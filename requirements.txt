@@ -4,3 +4,4 @@ python-dotenv
 dataset
 pandera[polars]
 polars-stubs
+pytest

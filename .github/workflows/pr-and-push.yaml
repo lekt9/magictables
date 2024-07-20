@@ -1,0 +1,11 @@
+name: PR and Push Checks
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    uses: ./.github/workflows/run-tests.yml
