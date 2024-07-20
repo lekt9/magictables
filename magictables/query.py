@@ -1,42 +1,50 @@
-from typing import List, Dict, Any, Optional
-from magictables.database import magic_db
+import dataset
+from typing import List, Dict, Any, Union
+
+MAGIC_DB = "sqlite:///magic.db"
 
 
-class SQLQueryBuilder:
+class DatasetQueryBuilder:
     def __init__(self, table_name: str):
-        self.table_name = table_name
-        self.conditions = []
-        self.order_by = None
-        self.limit = None
+        self.db = dataset.connect(MAGIC_DB)
+        self.table = self.db[table_name]
+        self.filters = {}
+        self.order = None
+        self._limit = None
+        self._offset = None
 
-    def where(self, condition: str) -> "SQLQueryBuilder":
-        self.conditions.append(condition)
+    def filter(self, **kwargs) -> "DatasetQueryBuilder":
+        self.filters.update(kwargs)
         return self
 
-    def order(self, column: str, ascending: bool = True) -> "SQLQueryBuilder":
-        self.order_by = f"{column} {'ASC' if ascending else 'DESC'}"
+    def order_by(self, order: str) -> "DatasetQueryBuilder":
+        self.order = order
         return self
 
-    def limit(self, n: int) -> "SQLQueryBuilder":
-        self.limit = n
+    def limit(self, limit: int) -> "DatasetQueryBuilder":
+        self._limit = limit
         return self
 
-    def build(self) -> str:
-        query = f"SELECT * FROM {self.table_name}"
-        if self.conditions:
-            query += " WHERE " + " AND ".join(self.conditions)
-        if self.order_by:
-            query += f" ORDER BY {self.order_by}"
-        if self.limit:
-            query += f" LIMIT {self.limit}"
-        return query
+    def offset(self, offset: int) -> "DatasetQueryBuilder":
+        self._offset = offset
+        return self
 
-    def execute(self) -> List[Dict[str, Any]]:
-        query = self.build()
-        with magic_db.get_connection() as conn:
-            result = conn.query(query)
-            return list(result)
+    def all(self) -> List[Dict[str, Any]]:
+        return list(
+            self.table.find(
+                **self.filters,
+                order_by=self.order,
+                _limit=self._limit,
+                _offset=self._offset,
+            )
+        )
+
+    def first(self) -> Union[Dict[str, Any], None]:
+        return self.table.find_one(**self.filters)
+
+    def count(self) -> int:
+        return self.table.count(**self.filters)
 
 
-def query(table_name: str) -> SQLQueryBuilder:
-    return SQLQueryBuilder(table_name)
+def query(table_name: str) -> DatasetQueryBuilder:
+    return DatasetQueryBuilder(table_name)
