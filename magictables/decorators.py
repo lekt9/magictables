@@ -3,16 +3,20 @@ import hashlib
 import json
 from typing import Any, Callable, Optional, Union, List, Dict, TypeVar, cast
 
+import pandas as pd
+
 from magictables.database import magic_db
 from magictables.utils import ensure_dataframe, call_ai_model, generate_ai_descriptions
 
 T = TypeVar("T", bound=Callable[..., Any])
+
 
 def generate_call_id(func: Callable, *args: Any, **kwargs: Any) -> str:
     call_data = (func.__name__, args, kwargs)
     return hashlib.md5(
         json.dumps(call_data, sort_keys=True, default=ensure_dataframe).encode()
     ).hexdigest()
+
 
 def mtable(func: Optional[Callable] = None) -> Callable[[T], T]:
     def decorator(f: T) -> T:
@@ -37,6 +41,7 @@ def mtable(func: Optional[Callable] = None) -> Callable[[T], T]:
         return cast(T, wrapper)
 
     return decorator if func is None else decorator(func)
+
 
 def mai(
     func: Optional[Callable] = None,
@@ -74,6 +79,7 @@ def mai(
 
     return decorator if func is None else decorator(func)
 
+
 def process_batches(
     table_name: str,
     data: List[Dict[str, Any]],
@@ -86,6 +92,7 @@ def process_batches(
         new_results = call_ai_model(batch, query)
         ai_results.extend(new_results)
     return ai_results
+
 
 def combine_results(
     original_df: pd.DataFrame,

@@ -13,12 +13,11 @@ MagicTables is a powerful Python library designed for data scientists, API scrap
 - Streamline your data engineering workflow with easy-to-use decorators
 - Support for various AI models through OpenRouter API for data enrichment
 - Simplify ETL processes with intelligent post-transformations
-- Construct complex SQL queries using a fluent interface, without writing raw SQL
-- Automatic type generation and hinting for improved data quality and IDE support
+- Construct SQL queries using a fluent interface, without writing raw SQL
 - Enhance data lineage and governance with built-in data cataloging
 - Optimize your data ops and MLOps workflows with efficient data storage and retrieval
 - Chain operations for complex data transformations
-- Convert results to various formats, including JSON and dictionaries
+- Convert results to various formats, including JSON and pandas DataFrames
 
 ## Installation
 
@@ -34,7 +33,7 @@ from typing import List, Dict, Any
 from dotenv import load_dotenv
 import requests
 import pandas as pd
-from magictables import mtable, mai, query_magic_db, QueryBuilder, execute_query
+from magictables import mtable, mai, query
 
 load_dotenv()
 
@@ -81,18 +80,16 @@ repos_with_summary = generate_repo_summary(processed_repos)
 print(repos_with_summary)
 
 # Query the shadow database
-query_builder = (
-    QueryBuilder()
-    .select("repo_name", "language", "popularity_score", "ai_summary")
-    .from_table("ai_generate_repo_summary")
+results = (
+    query("ai_generate_repo_summary")
     .where("popularity_score > 10")
-    .order_by("popularity_score DESC")
+    .order("popularity_score", ascending=False)
     .limit(5)
+    .execute()
 )
-
-results = execute_query(query_builder)
 print(results)
 ```
+
 ## Environment Setup and Configuration
 
 MagicTables uses environment variables for configuration, particularly for AI-related features. These variables are typically stored in a `.env` file in your project root. Here's how to set it up:
@@ -112,18 +109,10 @@ MagicTables uses environment variables for configuration, particularly for AI-re
    from dotenv import load_dotenv
    load_dotenv()  # This line must come before importing MagicTables
 
-   from magictables import mtable, mai, query_magic_db, QueryBuilder, execute_query
+   from magictables import mtable, mai, query
    ```
 
-   This ensures that the environment variables are loaded and available for use by MagicTables, particularly in the `utils.py` module.
-
-### Important Note
-
-MagicTables relies on these environment variables for AI-related functionalities. By calling `load_dotenv()` before importing MagicTables, you ensure that these variables are properly loaded and accessible to the library.
-
 ## How It Works
-
-MagicTables creates a shadow queryable database that automatically captures and stores the results of your function calls. This allows you to perform complex queries and analysis on your data without modifying your original code or data sources.
 
 ### @mtable()
 
@@ -138,9 +127,9 @@ The `@mai()` decorator uses AI to augment function calls with additional data. I
 
 This allows you to enrich your data with AI-generated insights seamlessly.
 
-### QueryBuilder and execute_query
+### query()
 
-The `QueryBuilder` class provides a fluent interface for constructing SQL queries without writing raw SQL. The `execute_query` function executes these queries on the shadow database.
+The `query()` function provides a fluent interface for constructing SQL queries without writing raw SQL. It allows you to chain methods like `where()`, `order()`, and `limit()` to build and execute queries on the shadow database.
 
 ## Advanced Usage
 
@@ -157,25 +146,20 @@ def generate_user_bio(username: str, company: str):
     return {"username": username, "company": company}
 ```
 
-### Complex Data Transformations
+### Working with Nested Data
+
+MagicTables automatically handles nested data structures, storing them in separate tables and reconstructing them when queried.
+
+### Complex Queries
 
 ```python
-result = (
-    fetch_github_repos("octocat")
-    .join(process_repo_data(), on="id")
-    .apply(lambda df: df[df['popularity_score'] > 10])
-    .to_dataframe()
-)
-```
-
-### Working with Multiple Data Sources
-
-```python
-combined_data = (
-    fetch_github_repos("octocat")
-    .join(fetch_repo_readmes(), on="id")
-    .join(generate_repo_summary(), on="id")
-    .to_dataframe()
+results = (
+    query("your_table_name")
+    .where("column1 > 10")
+    .where("column2 LIKE '%pattern%'")
+    .order("column3", ascending=False)
+    .limit(100)
+    .execute()
 )
 ```
 
@@ -185,11 +169,11 @@ combined_data = (
 2. Implement proper error handling in your decorated functions to ensure data integrity.
 3. Use batch processing with the `batch_size` parameter in `@mai()` for large datasets.
 4. Regularly maintain and clean up your shadow database to remove outdated data.
-5. Leverage the automatically generated type hints for better code safety and IDE support.
+5. Leverage the query builder for complex data analysis tasks.
 
 ## Contributing
 
-Contributions to MagicTables are welcome! Please read our [contribution guidelines](CONTRIBUTING.md) for more information on our development process and coding standards.
+Contributions to MagicTables are welcome! Please read our contribution guidelines for more information on our development process and coding standards.
 
 ## License
 
