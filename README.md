@@ -29,7 +29,7 @@ MagicTables is a Python library designed to streamline data science workflows by
 ## Quick Start
 
 ```python
-from magictables import mtable, msource, mchain
+from magictables import mtable, create_chain, msource
 import requests
 import polars as pl
 
@@ -38,22 +38,26 @@ def fetch_user_data(api_url):
     response = requests.get(api_url)
     return response.json()  # Automatically stored in SQLite
 
-@mtable()
+@mtable(query="Process user data and count users by city")
 def process_user_data(user_data):
     df = pl.DataFrame(user_data)
     return df.groupby("city").agg(pl.count("id").alias("user_count"))
 
-@mchain
-def user_analysis_pipeline(api_url):
-    raw_data = fetch_user_data(api_url)
-    return process_user_data(raw_data)
+def main():
+    user_analysis_chain = create_chain(
+        fetch_user_data,
+        process_user_data
+    )
 
-# Usage
-result = user_analysis_pipeline("https://api.example.com/users")
-print(result)
+    # Usage
+    result = user_analysis_chain.execute({"api_url": "https://api.example.com/users"})
+    print(result)
 
-# Data is automatically cached in SQLite. Subsequent calls use cached data:
-result_cached = user_analysis_pipeline("https://api.example.com/users")
+    # Data is automatically cached in SQLite. Subsequent calls use cached data:
+    result_cached = user_analysis_chain.execute({"api_url": "https://api.example.com/users"})
+
+if __name__ == "__main__":
+    main()
 ```
 
 ## Premium Features
