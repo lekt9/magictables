@@ -15,50 +15,38 @@ github_api.add_route(
 github_api.add_route(
     "repos", "https://api.github.com/users/{username}/repos", "Get user repositories"
 )
+github_api.add_route(
+    "issues",
+    "https://api.github.com/repos/{username}/{repo}/issues",
+    "Get repository issues",
+)
 
 stackoverflow_api = Source.api("Stack Overflow API")
 stackoverflow_api.add_route(
-    "users",
-    "https://api.stackexchange.com/2.3/users/{user_ids}",
-    "Get Stack Overflow user data",
+    "search",
+    "https://api.stackexchange.com/2.3/users?order=desc&sort=reputation&inname={username}&site=stackoverflow",
+    "Search Stack Overflow users by name",
 )
 
 # Create a Chain
 dev_profile = Chain()
-dev_profile.add(github_api, "Fetch GitHub user data and repositories")
-dev_profile.add(
-    stackoverflow_api, "Fetch Stack Overflow user data and combine with GitHub data"
-)
+dev_profile.add(github_api, "Fetch GitHub user data", "users")
+dev_profile.add(github_api, "Fetch GitHub user repositories", "repos")
+dev_profile.add(stackoverflow_api, "Search Stack Overflow users", "search")
+dev_profile.add(github_api, "Fetch GitHub issues for repositories", "issues")
 
-# Define an analysis query
-dev_profile.analyze(
-    "Summarize the developer's profile including GitHub and Stack Overflow data"
+# Create an input DataFrame with initial data
+input_data = pl.DataFrame(
+    {
+        "username": ["octocat", "torvalds"],
+    }
 )
 
 # Fetch and process data (automatically cached in graph database)
-result = dev_profile.execute(
-    username="octocat",
-    user_ids="1234567",
-    route_name="users",  # Specify the route name for each API call
-)
+result = dev_profile.execute(input_data=input_data)
 
 # Work with the result as a Polars DataFrame
+print("Final result:")
 print(result.head())
 print(result.columns)
-
-# Perform transformations using Polars expressions
-transformed = result.with_columns(pl.col("public_repos").alias("repo_count"))
-filtered = transformed.filter(pl.col("repo_count") > 10)
-
-# The result is a Polars DataFrame
-polars_df = filtered
-
-# Convert to Pandas if needed
-pandas_df = filtered.to_pandas()
-
-# Subsequent calls will use cached data and identified relationships from the graph database
-cached_result = dev_profile.execute(
-    username="octocat", user_ids="1234567", route_name="users"
-)
-
-print(cached_result)
+result.write_csv("Tallied Github and Stack overflow table")
