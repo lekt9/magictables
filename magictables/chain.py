@@ -1,72 +1,206 @@
-# chain.py
 import json
-from typing import List
 from .source import Source
 from .magictables import MagicTable
-from .utils import call_ai_model, to_dataframe
+from .utils import call_ai_model
 import polars as pl
+from typing import List, Dict, Any, Optional, Tuple
 
 
 class Chain:
     def __init__(self):
-        self.steps: List[Source] = []
-        self.magic_table = MagicTable.get_instance()
-        self.analysis_query = None
+        self.steps: List[Dict[str, Any]] = []
+        self.magic_table: MagicTable = MagicTable.get_instance()
+        self.analysis_query: Optional[str] = None
+        self.result: Optional[pl.DataFrame] = None
 
-    def add(self, source: Source):
-        self.steps.append(source)
+    def add(self, source: Source, query: Optional[str] = None):
+        self.steps.append({"source": source, "query": query})
+        return self
 
     def analyze(self, query: str):
         self.analysis_query = query
+        return self
 
     def execute(self, **kwargs) -> pl.DataFrame:
-        results = []
         for step in self.steps:
-            result = step.execute(**kwargs)
-            results.append(result)
+            source = step["source"]
+            query = step["query"]
+            current_result = source.execute(**kwargs)
 
-            # Identify relationships between steps
-            if len(results) > 1:
-                self._identify_relationships(results[-2], results[-1], step.name)
-
-        combined_result = pl.concat([to_dataframe(r) for r in results if r is not None])
+            if self.result is None:
+                self.result = current_result
+            else:
+                self.result = self._merge_dataframes(
+                    self.result, current_result, source.name, query
+                )
 
         if self.analysis_query:
-            analyzed_result = self._analyze(combined_result)
-            return analyzed_result
+            self.result = self._analyze(self.result)
 
-        return combined_result
+        return self.result
+
+    def _merge_dataframes(
+        self,
+        df1: pl.DataFrame,
+        df2: pl.DataFrame,
+        source_name: str,
+        query: Optional[str],
+    ) -> pl.DataFrame:
+        relationships = self._identify_relationships(df1, df2, source_name)
+
+        if query:
+            relationships = self._augment_relationships(relationships, query, df1, df2)
+
+        if relationships:
+            best_relationship = max(
+                relationships, key=lambda x: x[2]
+            )  # Get the relationship with the highest similarity
+            col1, col2, similarity = best_relationship
+
+            print(
+                f"Merging on columns: {col1} and {col2} with similarity {similarity:.2f}"
+            )
+            return df1.join(df2, left_on=col1, right_on=col2, how="outer")
+        else:
+            print(
+                "No strong relationships found. Aligning and concatenating dataframes."
+            )
+
+            # Create a mapping of columns based on the identified relationships
+            column_mapping = {}
+            for col1, col2, _ in relationships:
+                column_mapping[col2] = col1
+
+            # Rename columns in df2 based on the mapping
+            df2_aligned = df2.rename(column_mapping)
+
+            # Get all unique column names
+            all_columns = list(set(df1.columns) | set(df2_aligned.columns))
+
+            # Function to get the dtype of a column, defaulting to String if not present
+            def get_dtype(df, col):
+                return df.schema[col] if col in df.schema else pl.String
+
+            # Align both dataframes
+            df1_aligned = df1.select(
+                [
+                    (
+                        pl.col(c)
+                        if c in df1.columns
+                        else pl.lit(None).cast(get_dtype(df2_aligned, c)).alias(c)
+                    )
+                    for c in all_columns
+                ]
+            )
+            df2_aligned = df2_aligned.select(
+                [
+                    (
+                        pl.col(c)
+                        if c in df2_aligned.columns
+                        else pl.lit(None).cast(get_dtype(df1, c)).alias(c)
+                    )
+                    for c in all_columns
+                ]
+            )
+
+            # Concatenate the aligned dataframes
+            return pl.concat([df1_aligned, df2_aligned], how="vertical")
 
     def _identify_relationships(
         self, df1: pl.DataFrame, df2: pl.DataFrame, source_name: str
-    ):
-        common_columns = set(df1.columns) & set(df2.columns)
-        for column in common_columns:
-            self.magic_table.add_relationship(
-                source_name, df2.columns[0], f"common_{column}"
+    ) -> List[Tuple[str, str, float]]:
+        def get_column_statistics(df: pl.DataFrame, column: str) -> dict:
+            stats = df.select(
+                [
+                    pl.col(column).n_unique().alias("unique_count"),
+                    pl.col(column).count().alias("total_count"),
+                    pl.col(column).null_count().alias("null_count"),
+                    pl.col(column).cast(pl.Utf8).alias("dtype"),
+                ]
+            ).to_dict(as_series=False)
+            return {k: v[0] for k, v in stats.items()}
+
+        def get_sample_values(
+            df: pl.DataFrame, column: str, max_samples: int = 10000
+        ) -> List:
+            stats = get_column_statistics(df, column)
+            unique_count = stats["unique_count"]
+            total_count = stats["total_count"]
+
+            if unique_count <= max_samples:
+                return df.select(pl.col(column)).unique().to_series().to_list()
+            else:
+                sample_size = min(max_samples, total_count)
+                return (
+                    df.select(pl.col(column))
+                    .sample(n=sample_size, shuffle=True)
+                    .to_series()
+                    .to_list()
+                )
+
+        def calculate_similarity(values1: List, values2: List) -> float:
+            set1, set2 = set(values1), set(values2)
+            intersection = len(set1.intersection(set2))
+            union = len(set1.union(set2))
+            return intersection / union if union > 0 else 0
+
+        potential_relationships = []
+        for col1 in df1.columns:
+            stats1 = get_column_statistics(df1, col1)
+            values1 = get_sample_values(df1, col1)
+            for col2 in df2.columns:
+                stats2 = get_column_statistics(df2, col2)
+                values2 = get_sample_values(df2, col2)
+
+                similarity = calculate_similarity(values1, values2)
+
+                if similarity > 0.5:  # You can adjust this threshold
+                    potential_relationships.append((col1, col2, similarity))
+
+        # Sort relationships by similarity in descending order
+        potential_relationships.sort(key=lambda x: x[2], reverse=True)
+
+        # Add relationships to MagicTable
+        for col1, col2, similarity in potential_relationships:
+            relationship = f"potential_merge_key_{col1}_{col2}"
+            self.magic_table.add_relationship(source_name, df2.columns[0], relationship)
+            print(
+                f"Potential merge key found: {col1} (from previous step) and {col2} (from {source_name}) with similarity {similarity:.2f}"
             )
 
-        # Add more sophisticated relationship identification logic
-        numeric_columns1 = df1.select(pl.col(pl.NUMERIC_DTYPES)).columns
-        numeric_columns2 = df2.select(pl.col(pl.NUMERIC_DTYPES)).columns
+        return potential_relationships if potential_relationships else []
 
-        for col1 in numeric_columns1:
-            for col2 in numeric_columns2:
-                correlation = df1[col1].corr(df2[col2])
-                if abs(correlation) > 0.8:  # High correlation threshold
-                    self.magic_table.add_relationship(
-                        source_name, df2.columns[0], f"correlated_{col1}_{col2}"
-                    )
+    def _augment_relationships(
+        self,
+        relationships: List[Tuple[str, str, float]],
+        query: str,
+        df1: pl.DataFrame,
+        df2: pl.DataFrame,
+    ) -> List[Tuple[str, str, float]]:
+        input_data = {
+            "relationships": relationships,
+            "query": query,
+            "df1_columns": df1.columns,
+            "df2_columns": df2.columns,
+        }
+        prompt = """
+        Given the list of potential relationships between two dataframes and a user-provided query, 
+        modify the relationships to better match the query. You can add new relationships, remove existing ones, 
+        or adjust the similarity scores. Return a JSON object with the updated list of relationships in the format:
+        [{"col1": "column_name_1", "col2": "column_name_2", "similarity": float_value}, ...]
+        """
+        result = call_ai_model(input_data, prompt)
 
-        # Use AI to identify potential relationships
-        relationship_prompt = f"Identify potential relationships between {source_name} and {df2.columns[0]} based on their columns and data patterns."
-        ai_relationships = call_ai_model(
-            {"df1": df1.to_dict(as_series=False), "df2": df2.to_dict(as_series=False)},
-            relationship_prompt,
-        )
+        # Convert the AI model result to the expected format
+        updated_relationships = [
+            (r["col1"], r["col2"], r["similarity"]) for r in result
+        ]
 
-        for relationship in ai_relationships:
-            self.magic_table.add_relationship(source_name, df2.columns[0], relationship)
+        # Cache the updated relationships
+        cache_key = f"{df1.columns[0]}_{df2.columns[0]}_{query}"
+        self.magic_table.cache_relationships(cache_key, updated_relationships)
+
+        return updated_relationships
 
     def _analyze(self, data: pl.DataFrame) -> pl.DataFrame:
         input_data = {
@@ -80,65 +214,9 @@ class Chain:
 
     def get_related(self, key: str, relationship: str) -> pl.DataFrame:
         query = f"""
-        ?[related_data] := {self.steps[0].name}('{key}', data),
+        ?[related_data] := {self.steps[0]["source"].name}('{key}', data),
                            data['{relationship}'] = related_id,
-                           {self.steps[-1].name}(related_id, related_data)
+                           {self.steps[-1]["source"].name}(related_id, related_data)
         """
         result = self.magic_table.db.run(query)
         return pl.DataFrame([json.loads(row["related_data"]) for row in result])
-
-    def smart_join(self, prompt: str) -> pl.DataFrame:
-        # Execute the chain to get all data
-        data = self.execute()
-
-        # Get relationships for all sources
-        relationships = {
-            source: self.magic_table.get_relationships(source) for source in self.steps
-        }
-
-        # Prepare input for AI model
-        input_data = {
-            "data": data.to_dict(as_series=False),
-            "relationships": relationships,
-            "prompt": prompt,
-            "columns": data.columns,
-        }
-
-        # Call AI model to get joining instructions
-        join_instructions = call_ai_model(
-            input_data,
-            "Analyze the data, relationships, and columns. Provide detailed instructions for joining the data based on the given prompt. Include join types, columns to join on, and any necessary data transformations.",
-        )
-
-        # Initialize the joined data with the first dataframe
-        joined_data = data
-
-        # Apply joining instructions
-        for instruction in join_instructions:
-            table_name = instruction["table"]
-            join_type = instruction["join_type"]
-            join_columns = instruction["join_columns"]
-            transformations = instruction.get("transformations", [])
-
-            # Apply transformations
-            for transform in transformations:
-                joined_data = joined_data.with_columns(eval(transform))
-
-            # Perform the join
-            if join_columns:
-                joined_data = joined_data.join(
-                    data.select(pl.col(table_name + "_*")),
-                    on=join_columns,
-                    how=join_type,
-                )
-            else:
-                joined_data = joined_data.join(
-                    data.select(pl.col(table_name + "_*")), how="cross"
-                )
-
-        # Apply any final transformations or filters
-        final_transformations = join_instructions[-1].get("final_transformations", [])
-        for transform in final_transformations:
-            joined_data = joined_data.with_columns(eval(transform))
-
-        return joined_data
