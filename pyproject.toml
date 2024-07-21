@@ -8,6 +8,21 @@ readme = "README.md"
 
 [tool.poetry.dependencies]
 python = ">=3.9,<3.11"
+requests = "^2.32.3"
+python-dotenv = "^1.0.1"
+polars = "^1.2.1"
+polars-lts-cpu = "^1.2.1"
+dateparser = "^1.2.0"
+litellm = "^1.41.25"
+parsee-pdf-reader = "^0.1.6.0"
+cozo-embedded = "^0.7.6"
+pandas = "^2.2.2"
+bs4 = "^0.0.2"
+tinydb = "^4.8.0"
+scikit-learn = "^1.5.1"
+torch = "^2.3.1"
+transformers = "^4.42.4"
+faiss-cpu = "^1.8.0.post1"
 
 
 [build-system]
