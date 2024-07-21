@@ -8,8 +8,6 @@ pre-commit
 polars-lts-cpu
 typing_extensions
 dateparser
-jina
-PyPDF2
 litellm<1.40.0
 pydantic<2.0.0
 parsee-core<0.1.5.6

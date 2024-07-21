@@ -1,73 +1,67 @@
-import requests
-from magictables import mtable, create_chain
+from magictables import Source, Chain, Explain, to_dataframe, Input
 
-API_KEY = "1865f43a0549ca50d341dd9ab8b29f49"
-
-
-@mtable(query="Get popular movies with their id, title, and release date")
-def get_popular_movies(input_data=None):
-    url = "https://api.themoviedb.org/3/movie/popular"
-    params = {"api_key": API_KEY}
-    response = requests.get(url, params=params)
-    return response.json()
-
-
-@mtable(query="Get movie details including production companies")
-def get_movie_details(movie_id: int):
-    url = f"https://api.themoviedb.org/3/movie/{movie_id}"
-    params = {"api_key": API_KEY}
-    response = requests.get(url, params=params)
-    return response.json()
-
-
-@mtable(query="Get company details including origin country")
-def get_company_details(company_id: int):
-    url = f"https://api.themoviedb.org/3/company/{company_id}"
-    params = {"api_key": API_KEY}
-    response = requests.get(url, params=params)
-    return response.json()
-
-
-@mtable(query="Get country details including population and capital")
-def get_country_details(origin_country: str):
-    url = f"https://restcountries.com/v3.1/alpha/{origin_country}"
-    response = requests.get(url)
-    return response.json()
-
-
-@mtable(
-    query="Generate insights about movies, production companies, and their countries"
+# Define data sources
+github_api = Source.api("GitHub API")
+github_api.add_route(
+    "users",
+    "https://api.github.com/users/{username}",
+    query="Get user data including name, bio, and public repos count",
 )
-def generate_insights(movie, companies, countries):
-    insight = f"The movie '{movie['title']}' was produced by "
-    company_names = [company["name"] for company in companies]
-    insight += ", ".join(company_names[:-1]) + f" and {company_names[-1]}. "
+github_api.add_route(
+    "repos",
+    "https://api.github.com/users/{username}/repos",
+    query="Get user's repositories with star counts and languages used",
+)
 
-    for company in companies:
-        country = countries.get(company["origin_country"])
-        if country:
-            insight += f"{company['name']} is based in {country['name']['common']}, "
-            insight += f"which has a population of {country['population']} "
-            insight += f"and its capital is {country['capital'][0]}. "
+github_web = Source.web(
+    "GitHub Web", query="Extract user's contribution graph data for the last year"
+)
 
-    return {"movie": movie["title"], "insight": insight}
+user_pdf = Source.pdf(
+    "User Reports", query="Extract user's project summaries and completion dates"
+)
 
+# Create a data processing chain
+user_analysis = Chain()
+user_analysis.add(github_api.route("users"))
+user_analysis.add(github_api.route("repos"))
+user_analysis.add(github_web)
+user_analysis.add(user_pdf)
 
-def main():
-    movie_analysis_chain = create_chain(
-        get_popular_movies,
-        get_movie_details,
-        get_company_details,
-        # generate_insights,
-    )
+# AI-driven data joining and analysis
+user_analysis.analyze(
+    "Combine API user data, web-scraped contribution data, and PDF report data"
+)
 
-    print("Executing Movie Analysis chain:")
-    result = movie_analysis_chain.execute({})
+# Execute the chain with batch processing
+usernames = ["octocat", "torvalds", "gvanrossum"]
+result = user_analysis.execute(usernames=usernames, batch_size=2)
 
-    print("\nSecond execution (cache hit expected):")
-    result2 = movie_analysis_chain.execute({})
-    print("Cache hit successful" if result.equals(result2) else "Cache miss")
+# Convert to Polars DataFrame
+df = to_dataframe(result)
+print("Result DataFrame:")
+print(df)
 
+# Explain the data flow and processing
+explanation = Explain(user_analysis)
+print("\nChain Summary:")
+print(explanation.summary())
+print("\nData Flow:")
+print(explanation.data_flow())
+print("\nParsing Logic:")
+print(explanation.parsing_logic())
+print("\nShadow DB Schema:")
+print(explanation.shadow_db_schema())
 
-if __name__ == "__main__":
-    main()
+# Demonstrate Input class usage
+input_handler = Input()
+
+# Fetch data from API
+api_data = input_handler.from_api("GitHub API", "users", username="octocat")
+print("\nAPI Data:")
+print(api_data)
+
+# Fetch data from web
+web_data = input_handler.from_web("https://github.com/octocat")
+print("\nWeb Data:")
+print(web_data)
