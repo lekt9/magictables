@@ -425,8 +425,8 @@ def transform_data_with_query(
     Respond with a single string containing a valid Polars expression.
     """
 
-    transformation_result = call_ai_model([df_info], query=transformation_prompt)
-    content = transformation_result[0]
+    transformation_result = call_ai_model(df_info, prompt=transformation_prompt)
+    content = transformation_result
 
     if isinstance(content, dict):
         transformation = content.get("content", "")

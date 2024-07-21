@@ -1,44 +1,102 @@
 import polars as pl
 from functools import wraps
 from .database import magic_db
-from .utils import generate_call_id, call_ai_model, ensure_dataframe, generate_row_id
+from .utils import generate_call_id, call_ai_model, generate_row_id
 
-import PyPDF2
-import requests
-from typing import List, Union
+from typing import List, Union, Dict, Any
 
-
-def extract_text_from_pdf(pdf_path):
-    with open(pdf_path, "rb") as file:
-        reader = PyPDF2.PdfReader(file)
-        text = ""
-        for page in reader.pages:
-            text += page.extract_text()
-
-    return text
+# Parsee imports
+from parsee import Parsee
+from parsee.readers import PDFReader, WebReader
+from parsee.extractors import TextExtractor, TableExtractor
 
 
-def extract_text_from_url(url):
-    response = requests.get(f"https://r.jina.ai/{url}")
-    response.raise_for_status()
-    return response.text
+def extract_content(input_data: str, input_type: str) -> Dict[str, Any]:
+    parsee = Parsee()
+
+    if input_type == "pdf":
+        reader = PDFReader(input_data)
+    elif input_type in ["url", "html"]:
+        reader = WebReader(input_data)
+    else:
+        raise ValueError(f"Unsupported input type: {input_type}")
+
+    parsee.add_reader(reader)
+    parsee.add_extractor(TextExtractor())
+    parsee.add_extractor(TableExtractor())
+
+    result = parsee.parse()
+
+    return {
+        "text": result.get("text", ""),
+        "tables": result.get("tables", []),
+        "metadata": result.get("metadata", {}),
+    }
+
+
+def chunk_text(text: str, max_chars: int = 4000) -> pl.DataFrame:
+    lines = text.split("\n")
+    df = pl.DataFrame({"line": lines})
+    df = df.with_columns(
+        [
+            pl.col("line").str.len().alias("length"),
+            pl.col("line").str.len().cumsum().alias("cum_length"),
+        ]
+    )
+    df = df.with_columns(
+        (pl.col("cum_length") / max_chars).cast(pl.Int64).alias("chunk_id")
+    )
+    return df.group_by("chunk_id").agg([pl.col("line").str.concat("\n").alias("chunk")])
 
 
 def process_input(
-    input_data: Union[str, List[str]], input_type: str
-) -> Union[str, List[str]]:
+    input_data: Union[str, List[str]], input_type: str, max_chars: int = 4000
+) -> pl.DataFrame:
     if isinstance(input_data, list):
-        return [process_input(item, input_type) for item in input_data]
-
-    if input_type == "pdf":
-        return extract_text_from_pdf(input_data)
-    elif input_type == "url":
-        return extract_text_from_url(input_data)
+        df = pl.DataFrame({"input": input_data})
     else:
-        raise ValueError("Unsupported input type")
+        df = pl.DataFrame({"input": [input_data]})
+
+    df = df.with_columns(
+        [
+            pl.col("input")
+            .map_elements(lambda x: extract_content(x, input_type))
+            .alias("content")
+        ]
+    )
+
+    df = df.with_columns(
+        [
+            pl.col("content").struct.field("text").alias("text"),
+            pl.col("content").struct.field("tables").alias("tables"),
+            pl.col("content").struct.field("metadata").alias("metadata"),
+        ]
+    )
+
+    df = df.with_columns(
+        [
+            pl.col("text")
+            .map_elements(lambda x: chunk_text(x, max_chars))
+            .alias("chunks")
+        ]
+    )
+
+    df = df.explode("chunks")
+
+    df = df.with_columns(
+        [
+            pl.col("chunks")
+            .map_elements(
+                lambda x: call_ai_model({"text": x}, "Summarize the following text:")
+            )
+            .alias("summary")
+        ]
+    )
+
+    return df
 
 
-def magic_input(query: str = None, input_type: str = "pdf"):
+def msource(query: str = None, input_type: str = "auto", max_chars: int = 4000):
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
@@ -46,73 +104,88 @@ def magic_input(query: str = None, input_type: str = "pdf"):
             if not input_data:
                 raise ValueError("Input data not provided")
 
-            is_batch = isinstance(input_data, list)
-
-            if not is_batch:
-                input_data = [input_data]
-
-            results = []
-            for single_input in input_data:
-                call_id = generate_call_id(func, single_input, **kwargs)
-                table_name = f"magic_{func.__name__}"
-
-                # Check cache first
-                cached_result = magic_db.get_cached_result(table_name, call_id)
-                if cached_result is not None and not cached_result.is_empty():
-                    print(f"Cache hit for {func.__name__}")
-                    results.append(cached_result)
-                else:
-                    print(f"Cache miss for {func.__name__}")
-
-                    # Process input
-                    processed_text = process_input(single_input, input_type)
-
-                    # Call the wrapped function to get the desired output structure with example values
-                    output_structure = func(processed_text)
-
-                    # Generate content based on the output structure and example values
-                    if isinstance(output_structure, dict):
-                        result = generate_dict_content(
-                            processed_text, output_structure, query
-                        )
-                    elif isinstance(output_structure, list):
-                        result = generate_list_content(
-                            processed_text, output_structure, query
-                        )
-                    elif isinstance(output_structure, pl.DataFrame):
-                        result = generate_dataframe_content(
-                            processed_text, output_structure, query
-                        )
-                    else:
-                        raise ValueError("Unsupported output structure")
-
-                    # Convert result to DataFrame if it's not already
-                    df = ensure_dataframe(result)
-
-                    # Generate row IDs
-                    if not df.is_empty():
-                        try:
-                            df = df.with_columns(
-                                pl.struct(df.columns).map(generate_row_id).alias("id")
-                            )
-                        except Exception as e:
-                            print(f"Error generating row IDs: {e}")
-                    else:
-                        print("DataFrame is empty, skipping row ID generation")
-                    # Add function parameters as columns
-                    for arg_name, arg_value in kwargs.items():
-                        if isinstance(arg_value, (int, float, str, bool)):
-                            df = df.with_columns(pl.lit(arg_value).alias(arg_name))
-
-                    # Cache the results
-                    magic_db.cache_results(table_name, df, call_id)
-
-                    results.append(df)
-
-            if is_batch:
-                return pl.concat(results)
+            # Automatically detect input type if set to "auto"
+            if input_type == "auto":
+                detected_type = detect_input_type(input_data)
             else:
-                return results[0]
+                detected_type = input_type
+
+            # Process input
+            processed_df = process_input(input_data, detected_type, max_chars)
+
+            # Generate call_id for each input
+            processed_df = processed_df.with_columns(
+                [
+                    pl.struct(processed_df.columns)
+                    .map_elements(lambda x: generate_call_id(func, x, **kwargs))
+                    .alias("call_id")
+                ]
+            )
+
+            table_name = f"magic_{func.__name__}"
+
+            # Check cache
+            cached_results_dict = magic_db.get_cached_results(
+                [table_name], processed_df["call_id"].to_list()
+            )
+
+            # Extract cached results for the specific table
+            cached_results = cached_results_dict.get(table_name, pl.DataFrame())
+
+            # Process non-cached results
+            non_cached_df = processed_df.filter(
+                ~pl.col("call_id").is_in(cached_results["call_id"])
+                if not cached_results.is_empty()
+                else True
+            )
+            if non_cached_df.height > 0:
+                # Call the wrapped function to get the desired output structure with example values
+                output_structure = func(non_cached_df["summary"][0])
+
+                # Generate content based on the output structure and example values
+                if isinstance(output_structure, dict):
+                    result_df = generate_dict_content(
+                        non_cached_df, output_structure, query
+                    )
+                elif isinstance(output_structure, list):
+                    result_df = generate_list_content(
+                        non_cached_df, output_structure, query
+                    )
+                elif isinstance(output_structure, pl.DataFrame):
+                    result_df = generate_dataframe_content(
+                        non_cached_df, output_structure, query
+                    )
+                else:
+                    raise ValueError("Unsupported output structure")
+
+                # Generate row IDs
+                result_df = result_df.with_columns(
+                    [
+                        pl.struct(result_df.columns)
+                        .map_elements(generate_row_id)
+                        .alias("id")
+                    ]
+                )
+
+                # Add function parameters as columns
+                for arg_name, arg_value in kwargs.items():
+                    if isinstance(arg_value, (int, float, str, bool)):
+                        result_df = result_df.with_columns(
+                            pl.lit(arg_value).alias(arg_name)
+                        )
+
+                # Cache the results
+                for row in result_df.iter_rows(named=True):
+                    call_id = row["call_id"]
+                    row_df = pl.DataFrame([row])
+                    magic_db.cache_results(table_name, row_df, call_id)
+
+                # Combine cached and new results
+                final_df = pl.concat([cached_results, result_df])
+            else:
+                final_df = cached_results
+
+            return final_df if isinstance(input_data, list) else final_df.row(0)
 
         wrapper.function_name = func.__name__
         wrapper.query = query
@@ -122,27 +195,56 @@ def magic_input(query: str = None, input_type: str = "pdf"):
     return decorator
 
 
-def generate_dict_content(text, structure, query):
+def detect_input_type(input_data: str) -> str:
+    if input_data.lower().endswith(".pdf"):
+        return "pdf"
+    elif input_data.startswith(("http://", "https://")):
+        return "url"
+    elif input_data.strip().startswith("<"):
+        return "html"
+    else:
+        return "text"
+
+
+def generate_dict_content(
+    df: pl.DataFrame, structure: Dict[str, Any], query: str
+) -> pl.DataFrame:
     example_str = ", ".join([f"{k}: {v}" for k, v in structure.items()])
     prompt = f"""
     Based on the following text, generate a dictionary with the same structure as this example: {example_str}.
     Use the example values as a guide for the format and type of information to extract.
     Query: {query}
     """
-    return call_ai_model({"text": text}, prompt)
+    return df.with_columns(
+        [
+            pl.col("summary")
+            .map_elements(lambda x: call_ai_model({"text": x}, prompt))
+            .alias("result")
+        ]
+    )
 
 
-def generate_list_content(text, structure, query):
+def generate_list_content(
+    df: pl.DataFrame, structure: List[Dict[str, Any]], query: str
+) -> pl.DataFrame:
     example_str = ", ".join([f"{k}: {v}" for k, v in structure[0].items()])
     prompt = f"""
     Based on the following text, generate a list of dictionaries. Each dictionary should have the same structure as this example: {example_str}.
     Use the example values as a guide for the format and type of information to extract.
     Query: {query}
     """
-    return call_ai_model({"text": text}, prompt)
+    return df.with_columns(
+        [
+            pl.col("summary")
+            .map_elements(lambda x: call_ai_model({"text": x}, prompt))
+            .alias("result")
+        ]
+    )
 
 
-def generate_dataframe_content(text, df_structure, query):
+def generate_dataframe_content(
+    df: pl.DataFrame, df_structure: pl.DataFrame, query: str
+) -> pl.DataFrame:
     example_str = ", ".join(
         [f"{col}: {df_structure[col][0]}" for col in df_structure.columns]
     )
@@ -151,5 +253,10 @@ def generate_dataframe_content(text, df_structure, query):
     Use this example row as a guide for the format and type of information to extract: {example_str}
     Query: {query}
     """
-    data = call_ai_model({"text": text}, prompt)
-    return pl.DataFrame(data)
+    return df.with_columns(
+        [
+            pl.col("summary")
+            .map_elements(lambda x: call_ai_model({"text": x}, prompt))
+            .alias("result")
+        ]
+    )

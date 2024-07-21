@@ -19,6 +19,7 @@ setup(
         "litellm",
         "pre-commit",
         "pydantic",
+        "parsee-core",
     ],
     extras_require={
         "dev": ["pytest", "pytest-cov", "black", "isort", "flake8"],

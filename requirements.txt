@@ -1,4 +1,4 @@
-pandas
+pandas>=1.4.3,<2.0.0
 requests
 python-dotenv
 dataset
@@ -10,5 +10,6 @@ typing_extensions
 dateparser
 jina
 PyPDF2
-litellm
-pydantic
+litellm<1.40.0
+pydantic<2.0.0
+parsee-core<0.1.5.6

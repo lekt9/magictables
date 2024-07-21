@@ -256,6 +256,16 @@ class MagicDB:
 
         return df
 
+    def get_cached_results(
+        self, table_names: List[str], call_ids: List[str]
+    ) -> Dict[str, List[pl.DataFrame]]:
+        cached_results = {}
+        for table_name in table_names:
+            cached_results[table_name] = [
+                self.get_cached_result(table_name, call_id) for call_id in call_ids
+            ]
+        return cached_results
+
 
 magic_db = MagicDB()
 
