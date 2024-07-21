@@ -128,26 +128,53 @@ class MagicTable:
         )
         return result if result else {}
 
-    def cache_result(self, source_name: str, call_id: str, result: Dict[str, Any]):
+    def predict_identifier(self, data: pl.DataFrame) -> str:
+        input_data = {
+            "columns": data.columns,
+            "sample_data": data.head().to_dict(as_series=False),
+        }
+        prompt = """
+        Analyze the given columns and sample data. Suggest the best column or combination of columns to use as a unique identifier (primary key) for this data.
+        Consider factors like uniqueness, stability, and meaningfulness of the data.
+        Return a JSON object with a single key 'identifier', whose value is either a single column name or a list of column names to be used together as a composite key.
+        """
+        result = call_ai_model(input_data, prompt)
+        return result["identifier"]
+
+    def cache_result(self, source_name: str, identifier: str, result: Dict[str, Any]):
         timestamp = str(datetime.now())
         self.cached_results.insert(
             {
                 "source_name": source_name,
-                "call_id": call_id,
+                "identifier": identifier,
                 "result": result,
                 "timestamp": timestamp,
             }
         )
 
     def get_cached_result(
-        self, source_name: str, call_id: str
+        self, source_name: str, identifier: str
     ) -> Optional[Dict[str, Any]]:
         CachedResult = Query()
         result = self.cached_results.get(
             (CachedResult.source_name == source_name)
-            & (CachedResult.call_id == call_id)
+            & (CachedResult.identifier == identifier)
         )
         return result["result"] if result else None
+
+    def find_similar_cached_result(
+        self, source_name: str, data: pl.DataFrame
+    ) -> Optional[Dict[str, Any]]:
+        try:
+            identifier = self.predict_identifier(data)
+            if isinstance(identifier, list):
+                identifier_value = tuple(data[col][0] for col in identifier)
+            else:
+                identifier_value = data[identifier][0]
+
+            return self.get_cached_result(source_name, str(identifier_value))
+        except:
+            return None
 
     def cache_relationships(
         self, cache_key: str, relationships: List[Tuple[str, str, float]]
@@ -222,6 +249,29 @@ class MagicTable:
 
         return pl.DataFrame(result)
 
+    def store_execution_details(
+        self, source_name: str, execution_details: Dict[str, Any]
+    ):
+        """
+        Store execution details for a given source.
+        """
+        self.db.table("execution_details").insert(
+            {
+                "source_name": source_name,
+                "details": execution_details,
+                "timestamp": str(datetime.now()),
+            }
+        )
+
+    def get_execution_details(self, source_name: str) -> List[Dict[str, Any]]:
+        """
+        Retrieve execution details for a given source.
+        """
+        ExecutionDetails = Query()
+        return self.db.table("execution_details").search(
+            ExecutionDetails.source_name == source_name
+        )
+
     def analyze(self, query: str) -> pl.DataFrame:
         input_data = {
             "data": self.to_dataframe("nodes").to_dict(as_series=False),
@@ -247,3 +297,16 @@ class MagicTable:
         )
         related_nodes = [self.get_node(edge["target"]) for edge in related_edges]
         return related_nodes
+
+    def store_result(self, source_name: str, result: pl.DataFrame):
+        """
+        Store the result DataFrame in the database.
+        """
+        result_dict = result.to_dict(as_series=False)
+        self.db.table("results").insert(
+            {
+                "source_name": source_name,
+                "result": result_dict,
+                "timestamp": str(datetime.now()),
+            }
+        )

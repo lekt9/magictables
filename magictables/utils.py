@@ -35,24 +35,16 @@ os.environ["OR_APP_NAME"] = "MagicTables"  # optional
 def flatten_nested_structure(nested_structure):
     flattened_rows = []
 
-    def flatten(obj, prefix=""):
-        if isinstance(obj, dict):
-            row = {}
-            for key, value in obj.items():
-                new_key = f"{prefix}_{key}" if prefix else key
-                if isinstance(value, (dict, list)):
-                    flatten(value, new_key)
-                else:
-                    row[new_key] = value
-            if row:
-                flattened_rows.append(row)
-        elif isinstance(obj, list):
-            for item in obj:
-                flatten(item, prefix)
-        else:
-            flattened_rows.append({prefix: obj})
+    if isinstance(nested_structure, dict) and "results" in nested_structure:
+        top_level_info = {k: v for k, v in nested_structure.items() if k != "results"}
+        for item in nested_structure["results"]:
+            row = top_level_info.copy()
+            row.update(item)
+            flattened_rows.append(row)
+    else:
+        # Fallback for other structures, though this case shouldn't occur with your data
+        flattened_rows.append(nested_structure)
 
-    flatten(nested_structure)
     return flattened_rows
 
 
