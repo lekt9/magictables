@@ -53,6 +53,8 @@ def main():
 
     result2.write_json("movies.json")
 
+    print("Result", result2)
+
 
 if __name__ == "__main__":
     main()

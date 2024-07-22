@@ -2,7 +2,8 @@
 import polars as pl
 import requests
 from typing import Dict, Any, List, Optional
-from .utils import flatten_nested_structure
+
+from magictables.utils import flatten_nested_structure
 from .magictables import INTERNAL_COLUMNS, MagicTable
 from dataclasses import dataclass, field
 
@@ -46,11 +47,47 @@ class Source:
     def execute_batch(
         self, input_data: pl.DataFrame, query: str, route_name: str, urls: pl.Series
     ) -> pl.DataFrame:
-        results = []
+        def process_batch(batch: pl.DataFrame) -> pl.DataFrame:
+            def make_api_request(url: str) -> Dict[str, Any]:
+                result = self._execute_api(url, query)
+                print("result", result)
+                return result.data[0] if result.data else {}
+
+            results = [make_api_request(url) for url in batch["url"]]
+            return pl.DataFrame(results)
+
+        # Convert to LazyFrame and add URL column
+        lazy_df = input_data.lazy().with_columns([pl.Series(name="url", values=urls)])
+
+        # Apply map_batches
+        result_lazy = lazy_df.map_batches(process_batch)
+
+        # Collect the result
+        result_df = result_lazy.collect()
+
+        # Process the results
         for url in urls:
-            result = self.execute(input_data, query, route_name, url)
-            results.append(result)
-        return pl.concat(results)
+            context = url
+            response = (
+                None  # We don't have individual responses in this parallel approach
+            )
+            self._store_execution_details(context, response)
+
+        # Cache and store results
+        try:
+            identifier = self.magic_table.predict_identifier(result_df)[0]
+            self.magic_table.cache_result(
+                self.name, str(identifier), result_df.to_dict(as_series=False)
+            )
+        except Exception as e:
+            print(f"Error caching result: {e}")
+
+        try:
+            self.magic_table.store_result(self.name, result_df)
+        except Exception as e:
+            print(f"Error storing result in database: {e}")
+
+        return result_df
 
     def execute(
         self,
@@ -62,11 +99,9 @@ class Source:
         if url is None:
             raise ValueError("URL must be provided for API execution")
 
-        # If input_data is None, create an empty DataFrame
         if input_data is None:
             input_data = pl.DataFrame()
 
-        # Try to find a similar cached result
         cached_result = self.magic_table.find_similar_cached_result(
             self.name, input_data
         )
@@ -77,70 +112,24 @@ class Source:
         if self.source_type == "api":
             try:
                 result = self._execute_api(url, query)
+                result_df = pl.DataFrame(result.data)
+                result_df = result_df.select(
+                    [col for col in result_df.columns if col not in INTERNAL_COLUMNS]
+                )
             except Exception as e:
                 print(f"Error in _execute_api: {e}")
                 return pl.DataFrame()
         else:
             raise ValueError(f"Unsupported source type: {self.source_type}")
 
-        try:
-            # Flatten the nested structure and rename duplicate columns
-            flattened_data = [flatten_nested_structure(item) for item in result.data]
-
-            # Rename duplicate columns
-            all_keys = set()
-            for item_list in flattened_data:
-                for item in item_list:
-                    renamed_item = {}
-                    for key, value in item.items():
-                        if key in all_keys:
-                            count = 1
-                            new_key = f"{key}_{count}"
-                            while new_key in all_keys:
-                                count += 1
-                                new_key = f"{key}_{count}"
-                            renamed_item[new_key] = value
-                        else:
-                            renamed_item[key] = value
-                        all_keys.add(new_key if key in all_keys else key)
-                    item.update(renamed_item)
-
-            # Flatten the list of lists into a single list of dictionaries
-            flattened_data = [item for sublist in flattened_data for item in sublist]
-            result_df = pl.DataFrame(flattened_data)
-
-            # Handle ID columns
-            id_columns = [
-                col for col in result_df.columns if col.lower().endswith("id")
-            ]
-            if len(id_columns) > 1:
-                result_df = result_df.with_columns(
-                    [
-                        pl.concat_str(
-                            [result_df[col] for col in id_columns], separator="_"
-                        ).alias("merged_id")
-                    ]
-                )
-                result_df = result_df.drop(id_columns)
-
-            result_df = result_df.select(
-                [col for col in result_df.columns if col not in INTERNAL_COLUMNS]
-            )
-            print(result_df, " res")
-
-        except Exception as e:
-            print(f"Error converting result to DataFrame: {e}")
-            print(f"Result data: {result.data}")
-            return pl.DataFrame()
-
-        # Store the contexts and responses
+        # Store execution details
         for context, response in zip(result.contexts, result.responses):
             try:
                 self._store_execution_details(context, response)
             except Exception as e:
                 print(f"Error storing execution details: {e}")
 
-        # Cache the result
+        # Cache and store results
         try:
             identifier = self.magic_table.predict_identifier(result_df)[0]
             self.magic_table.cache_result(
@@ -149,7 +138,6 @@ class Source:
         except Exception as e:
             print(f"Error caching result: {e}")
 
-        # Store the result in the database
         try:
             self.magic_table.store_result(self.name, result_df)
         except Exception as e:
@@ -162,38 +150,16 @@ class Source:
             response = requests.get(
                 url, headers={"Accept": "application/json"}, timeout=10
             )
+
             response.raise_for_status()
             data = response.json()
 
-            # Check if the data is a list of items or a single item
-            if isinstance(data, list):
-                flattened_data = [flatten_nested_structure(item) for item in data]
-            else:
-                flattened_data = [flatten_nested_structure(data)]
-
-            # Convert the flattened data to a DataFrame
-            df = pl.DataFrame(flattened_data)
-
-            # Handle duplicate column names
-            renamed_columns = {}
-            for col in df.columns:
-                count = 1
-                new_col = col
-                while new_col in renamed_columns.values():
-                    new_col = f"{col}_{count}"
-                    count += 1
-                renamed_columns[col] = new_col
-
-            df = df.rename(renamed_columns)
-
-            # Expand struct columns
-            for col in df.columns:
-                if df[col].dtype == pl.Struct:
-                    expanded = df[col].struct.unnest()
-                    df = df.drop(col).hstack(expanded)
+            data = flatten_nested_structure(data)
 
             return ExecutionResult(
-                data=df.to_dicts(), contexts=[url], responses=[response]
+                data=[data] if isinstance(data, dict) else data,
+                contexts=[url],
+                responses=[response],
             )
         except Exception as e:
             print(f"Error executing API call: {e}")
