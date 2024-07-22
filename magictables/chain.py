@@ -18,6 +18,255 @@ class Chain:
         self.steps.append({"source": source, "query": query, "route_name": route_name})
         return self
 
+    def _populate_url(
+        self, url_template: str, mapping: Dict[str, Dict[str, Any]], row: Dict[str, Any]
+    ) -> str:
+        parsed_url = urlparse(url_template)
+        path = parsed_url.path
+        query_params = parse_qs(parsed_url.query)
+
+        print("Debug: path =", path)
+
+        # Check if there are any placeholders in the path
+        placeholders = re.findall(r"\{([^}]+)\}", path)
+        print("Debug: placeholders found =", placeholders)
+
+        if not placeholders:
+            print("No placeholders found in the path. Using alternative method.")
+            # Alternative method using re.search()
+            placeholder = re.search(r"\{([^}]+)\}", path)
+            while placeholder:
+                placeholder_text = placeholder.group(1)
+                print("Debug: processing placeholder:", placeholder_text)
+                print("mapping", mapping)
+                print("mapping", type(mapping))
+
+                if placeholder_text in mapping:
+                    print("pl", placeholder_text)
+                    map_info = mapping[placeholder_text]
+                    print("place", map_info)
+                    source_col = map_info["source_column"]
+                    value = row[map_info["source_column"]]
+
+                    print("Debug: value =", value)
+
+                    if map_info["transformation"]:
+                        value = eval(
+                            f"pl.Series([value]).{map_info['transformation']}"
+                        )[0]
+
+                    path = path.replace(f"{{{placeholder_text}}}", str(value))
+
+                # Look for next placeholder
+                placeholder = re.search(r"\{([^}]+)\}", path)
+        else:
+            # Original method using re.findall()
+            for placeholder in placeholders:
+                print("Debug: processing placeholder:", placeholder)
+                print("mapping", mapping)
+                print("mapping", type(mapping))
+
+                if placeholder in mapping:
+                    map_info = mapping[placeholder]
+                    source_col = map_info["source_column"]
+                    value = row[map_info["source_column"]]
+
+                    print("Debug: value =", value)
+
+                    if map_info["transformation"]:
+                        value = eval(
+                            f"pl.Series([value]).{map_info['transformation']}"
+                        )[0]
+
+                    path = path.replace(f"{{{placeholder}}}", str(value))
+
+        # Rest of the function remains the same...
+
+        # Populate query parameters
+        for param, values in query_params.items():
+            if param in mapping:
+                map_info = mapping[param]
+                source_col = map_info["source_column"]
+                if source_col in row:
+                    value = row[map_info["new_column"]]
+                    print("Debug: query param value =", value)
+
+                    if map_info["transformation"]:
+                        value = eval(
+                            f"pl.Series([value]).{map_info['transformation']}"
+                        )[0]
+                    query_params[param] = [str(value)]
+
+        # Reconstruct the URL
+        populated_url = parsed_url._replace(
+            path=path, query=urlencode(query_params, doseq=True)
+        ).geturl()
+
+        print("Debug: final populated_url =", populated_url)
+        return populated_url
+
+    def execute(self, input_data: Optional[pl.DataFrame] = None) -> pl.DataFrame:
+        current_data = input_data if input_data is not None else pl.DataFrame()
+        for step in self.steps:
+            source = step["source"]
+            query = step["query"]
+            route_name = step["route_name"]
+
+            try:
+                # Get the route details
+                route = source.magic_table.get_route(source.name, route_name)
+                if not route:
+                    raise ValueError(
+                        f"No route found for {source.name} with name {route_name}"
+                    )
+
+                # Extract parameters from the URL template
+                url_template = route["url"]
+                print("url_template", url_template)
+                params = self._extract_params_from_url_template(url_template, route)
+                print("params", params)
+
+                # Check if there are any parameters to process
+                if not params["path_params"] and not params["query_params"]:
+                    # If no parameters, execute the source directly
+                    step_result = source.execute(
+                        input_data=current_data,
+                        query=query,
+                        route_name=route_name,
+                        url=url_template,
+                    )
+                else:
+                    # Generate column mapping options
+                    mapping_options = self._generate_column_mappings(
+                        current_data, params, query, route
+                    )
+
+                    print("Mapping options:", mapping_options)
+
+                    for mapping in mapping_options:
+                        failure_count = 0
+                        while failure_count < 3:
+                            transformed_data = current_data.clone()
+                            try:
+                                for param, map_info in mapping.items():
+                                    # Check if the param already has a value
+                                    if param in route and route[param]:
+                                        continue  # Skip mapping if param already has a value
+
+                                    source_col = map_info["source_column"]
+                                    new_col = map_info["new_column"]
+                                    transformation = map_info["transformation"]
+
+                                    if source_col in transformed_data.columns:
+                                        if transformation:
+                                            # Check if the transformation is a list join operation
+                                            if "list.join" in transformation:
+                                                # First, cast the list elements to strings, then join
+                                                transformed_data = (
+                                                    transformed_data.with_columns(
+                                                        pl.col(source_col)
+                                                        .cast(pl.List(pl.Utf8))
+                                                        .list.join(", ")
+                                                        .alias(new_col)
+                                                    )
+                                                )
+                                            else:
+                                                # For other transformations, use the original logic
+                                                transformed_data = (
+                                                    transformed_data.with_columns(
+                                                        eval(transformation).alias(
+                                                            new_col
+                                                        )
+                                                    )
+                                                )
+                                        else:
+                                            transformed_data = (
+                                                transformed_data.with_columns(
+                                                    pl.col(source_col).alias(new_col)
+                                                )
+                                            )
+                                step_results = []
+
+                                # Iterate over each row in the transformed data
+                                for row in transformed_data.iter_rows(named=True):
+                                    # Populate the URL with the transformed data for this row
+                                    populated_url = self._populate_url(
+                                        url_template, mapping, row
+                                    )
+
+                                    print("pop url", populated_url)
+                                    # Execute the step with the transformed data and populated URL
+                                    row_result = source.execute(
+                                        input_data=pl.DataFrame([row]),
+                                        query=query,
+                                        route_name=route_name,
+                                        url=populated_url,
+                                    )
+                                    step_results.append(row_result)
+
+                                # Combine all row results
+                                step_result = pl.concat(step_results)
+
+                                # If successful, break both loops
+                                print(f"Successful execution with mapping: {mapping}")
+                                break
+
+                            except Exception as e:
+                                print(f"Execution failed with mapping {mapping}: {e}")
+                                failure_count += 1
+                                if failure_count == 3:
+                                    print(
+                                        f"Moving to next mapping option after 3 failures"
+                                    )
+                                continue
+
+                        if failure_count < 3:
+                            # If we've successfully processed the data, break the outer loop
+                            break
+                    else:
+                        # If all mapping options fail, raise an exception
+                        raise ValueError("All mapping options failed for this step")
+
+                # Process the step_result
+                if not step_result.is_empty():
+                    step_result = step_result.select(
+                        [
+                            col
+                            for col in step_result.columns
+                            if col not in INTERNAL_COLUMNS
+                        ]
+                    )
+
+                    flattened_result = flatten_nested_structure(
+                        step_result.to_dict(as_series=False)
+                    )
+
+                    # Convert the flattened result back to a DataFrame
+                    temp_df = pl.DataFrame(flattened_result)
+
+                    # Expand the arrays into multiple rows
+                    expanded_df = temp_df.explode(temp_df.columns)
+
+                    # Update current_data with the expanded DataFrame
+                    current_data = expanded_df
+                else:
+                    print("No valid results returned for this step")
+
+            except Exception as e:
+                print(f"Error executing step: {e}")
+                # Instead of continuing, we'll return the current_data
+                # This allows partial results to be returned if a step fails
+                return current_data
+
+        if self.analysis_query:
+            current_data = self._analyze(current_data)
+
+        # Remove INTERNAL_COLUMNS from the final result
+        self.result = current_data.select(
+            [col for col in current_data.columns if col not in INTERNAL_COLUMNS]
+        )
+        return self.result
+
     def _extract_params_from_url_template(
         self, url_template: str, route: Dict[str, Any]
     ) -> Dict[str, List[str]]:
@@ -270,7 +519,7 @@ class Chain:
         {{
             "operations": [
                 {{"operation": "filter", "params": {{"column": "age", "predicate": "> 30"}}}},
-                {{"operation": "group_by", "params": {{"by": ["category"], "agg": {{"sales": "sum"}}}}}},
+                {{"operation": "groupby", "params": {{"by": ["category"], "agg": {{"sales": "sum"}}}}}},
                 {{"operation": "sort", "params": {{"by": "sales", "descending": true}}}}
             ]
         }}
@@ -285,11 +534,9 @@ class Chain:
                 data = data.filter(
                     eval(f"pl.col('{params['column']}') {params['predicate']}")
                 )
-            elif operation == "group_by":
-                agg_dict = {
-                    col: getattr(pl, agg)() for col, agg in params["agg"].items()
-                }
-                data = data.group_by(params["by"]).agg(agg_dict)
+            elif operation == "groupby":
+                agg_dict = {col: getattr(pl, agg) for col, agg in params["agg"].items()}
+                data = data.groupby(params["by"]).agg(agg_dict)
             elif operation == "sort":
                 data = data.sort(
                     params["by"], descending=params.get("descending", False)
@@ -300,226 +547,3 @@ class Chain:
 
     def get_result(self) -> Optional[pl.DataFrame]:
         return self.result
-
-    def execute(self, input_data: Optional[pl.DataFrame] = None) -> pl.DataFrame:
-        current_data = input_data if input_data is not None else pl.DataFrame()
-        for step in self.steps:
-            source = step["source"]
-            query = step["query"]
-            route_name = step["route_name"]
-
-            try:
-                # Get the route details
-                route = source.magic_table.get_route(source.name, route_name)
-                if not route:
-                    raise ValueError(
-                        f"No route found for {source.name} with name {route_name}"
-                    )
-
-                # Extract parameters from the URL template
-                url_template = route["url"]
-                params = self._extract_params_from_url_template(url_template, route)
-
-                if not params["path_params"] and not params["query_params"]:
-                    # If no parameters, execute the source directly
-                    step_result = source.execute(
-                        input_data=current_data,
-                        query=query,
-                        route_name=route_name,
-                        url=url_template,
-                    )
-                else:
-                    # Generate column mapping options
-                    mapping_options = self._generate_column_mappings(
-                        current_data, params, query, route
-                    )
-
-                    for mapping in mapping_options:
-                        try:
-                            # Apply transformations using vectorized operations
-                            transformed_data = self._apply_transformations(
-                                current_data, mapping
-                            )
-
-                            # Populate URLs using vectorized operations
-                            # Populate URLs using vectorized operations
-                            populated_urls_df = self._populate_urls_vectorized(
-                                url_template, mapping, transformed_data
-                            )
-
-                            # Extract the 'populated_url' column as a Series
-                            populated_urls = populated_urls_df["populated_url"]
-
-                            # Execute the step with the transformed data and populated URLs
-                            step_result = source.execute_batch(
-                                input_data=transformed_data,
-                                query=query,
-                                route_name=route_name,
-                                urls=populated_urls,
-                            )
-
-                            # If successful, break the loop
-                            break
-                        except Exception as e:
-                            print(f"Execution failed with mapping {mapping}: {e}")
-                            continue
-                    else:
-                        # If all mapping options fail, raise an exception
-                        raise ValueError("All mapping options failed for this step")
-
-                # Process the step_result
-                if not step_result.is_empty():
-                    step_result = step_result.select(
-                        [
-                            col
-                            for col in step_result.columns
-                            if col not in INTERNAL_COLUMNS
-                        ]
-                    )
-
-                    flattened_result = flatten_nested_structure(
-                        step_result.to_dict(as_series=False)
-                    )
-                    temp_df = pl.DataFrame(flattened_result)
-                    expanded_df = temp_df.explode(temp_df.columns)
-                    current_data = expanded_df
-                else:
-                    print("No valid results returned for this step")
-
-            except Exception as e:
-                print(f"Error executing step: {e}")
-                return current_data
-
-        if self.analysis_query:
-            current_data = self._analyze(current_data)
-
-        self.result = current_data
-        return self.result
-
-    def _populate_url(
-        self, url_template: str, mapping: Dict[str, Dict[str, Any]], row: Dict[str, Any]
-    ) -> str:
-        parsed_url = urlparse(url_template)
-        path = parsed_url.path
-        query_params = parse_qs(parsed_url.query)
-
-        print("Debug: path =", path)
-
-        # Check if there are any placeholders in the path
-        placeholders = re.findall(r"\{([^}]+)\}", path)
-        print("Debug: placeholders found =", placeholders)
-
-        if not placeholders:
-            print("No placeholders found in the path. Using alternative method.")
-            # Alternative method using re.search()
-            placeholder = re.search(r"\{([^}]+)\}", path)
-            while placeholder:
-                placeholder_text = placeholder.group(1)
-                print("Debug: processing placeholder:", placeholder_text)
-                print("mapping", mapping)
-                print("mapping", type(mapping))
-
-                if placeholder_text in mapping:
-                    print("pl", placeholder_text)
-                    map_info = mapping[placeholder_text]
-                    print("place", map_info)
-                    source_col = map_info["source_column"]
-                    value = row[map_info["source_column"]]
-
-                    print("Debug: value =", value)
-
-                    if map_info["transformation"]:
-                        value = eval(
-                            f"pl.Series([value]).{map_info['transformation']}"
-                        )[0]
-
-                    path = path.replace(f"{{{placeholder_text}}}", str(value))
-
-                # Look for next placeholder
-                placeholder = re.search(r"\{([^}]+)\}", path)
-        else:
-            # Original method using re.findall()
-            for placeholder in placeholders:
-                print("Debug: processing placeholder:", placeholder)
-                print("mapping", mapping)
-                print("mapping", type(mapping))
-
-                if placeholder in mapping:
-                    map_info = mapping[placeholder]
-                    source_col = map_info["source_column"]
-                    value = row[map_info["source_column"]]
-
-                    print("Debug: value =", value)
-
-                    if map_info["transformation"]:
-                        value = eval(
-                            f"pl.Series([value]).{map_info['transformation']}"
-                        )[0]
-
-                    path = path.replace(f"{{{placeholder}}}", str(value))
-
-        # Rest of the function remains the same...
-
-        # Populate query parameters
-        for param, values in query_params.items():
-            if param in mapping:
-                map_info = mapping[param]
-                source_col = map_info["source_column"]
-                if source_col in row:
-                    value = row[map_info["new_column"]]
-                    print("Debug: query param value =", value)
-
-                    if map_info["transformation"]:
-                        value = eval(
-                            f"pl.Series([value]).{map_info['transformation']}"
-                        )[0]
-                    query_params[param] = [str(value)]
-
-        # Reconstruct the URL
-        populated_url = parsed_url._replace(
-            path=path, query=urlencode(query_params, doseq=True)
-        ).geturl()
-
-        print("Debug: final populated_url =", populated_url)
-        return populated_url
-
-    def _populate_urls_vectorized(
-        self, url_template: str, mapping: Dict[str, Dict[str, Any]], df: pl.DataFrame
-    ) -> pl.DataFrame:
-        def populate_url_for_row(row_dict):
-            return self._populate_url(url_template, mapping, row_dict)
-
-        # Apply the function to each row of the DataFrame
-        return df.select(
-            pl.struct(df.columns)
-            .map_elements(populate_url_for_row)
-            .alias("populated_url")
-        )
-
-    def _apply_transformations(
-        self, df: pl.DataFrame, mapping: Dict[str, Dict[str, Any]]
-    ) -> pl.DataFrame:
-        for param, map_info in mapping.items():
-            source_col = map_info["source_column"]
-            new_col = map_info["new_column"]
-            transformation = map_info["transformation"]
-
-            if source_col in df.columns:
-                if transformation:
-                    if "list.join" in transformation:
-                        df = df.with_columns(
-                            pl.col(source_col)
-                            .cast(pl.List(pl.Utf8))
-                            .list.join(", ")
-                            .alias(new_col)
-                        )
-                    else:
-                        df = df.with_columns(
-                            eval(f"pl.col('{source_col}').{transformation}").alias(
-                                new_col
-                            )
-                        )
-                else:
-                    df = df.with_columns(pl.col(source_col).alias(new_col))
-
-        return df
