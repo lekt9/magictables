@@ -5,6 +5,8 @@ from typing import List, Dict, Any, Optional
 from .source import Source
 from .magictables import MagicTable
 from .utils import call_ai_model
+import re
+from urllib.parse import urlparse, parse_qs
 
 
 class Chain:
@@ -18,8 +20,8 @@ class Chain:
         self.steps.append({"source": source, "query": query, "route_name": route_name})
         return self
 
-    def execute(self, input_data: pl.DataFrame) -> pl.DataFrame:
-        current_data = input_data
+    def execute(self, input_data: Optional[pl.DataFrame] = None) -> pl.DataFrame:
+        current_data = input_data if input_data is not None else pl.DataFrame()
 
         print("self steps", self.steps)
 
@@ -29,14 +31,35 @@ class Chain:
             route_name = step["route_name"]
 
             try:
+                # Get the route details
+                route = source.magic_table.get_route(source.name, route_name)
+                if not route:
+                    raise ValueError(
+                        f"No route found for {source.name} with name {route_name}"
+                    )
+
+                # Extract parameters from the URL template
+                url_template = route["url"]
+                params = self._extract_params_from_url_template(url_template)
+
+                # Rename columns if input data is not empty
+                if not current_data.is_empty():
+                    current_data = self._rename_columns_for_params(
+                        current_data, params, query
+                    )
+
+                # Execute the step
                 step_result = source.execute(
                     input_data=current_data, query=query, route_name=route_name
                 )
 
                 if isinstance(step_result, pl.DataFrame) and not step_result.is_empty():
-                    current_data = self._merge_dataframes(
-                        current_data, step_result, query
-                    )
+                    if current_data.is_empty():
+                        current_data = step_result
+                    else:
+                        current_data = self._merge_dataframes(
+                            current_data, step_result, query
+                        )
                 else:
                     print(
                         f"Warning: Step '{query}' returned no data or invalid result. Using previous data."
@@ -50,6 +73,58 @@ class Chain:
 
         self.result = current_data
         return self.result
+
+    def _extract_params_from_url_template(
+        self, url_template: str
+    ) -> Dict[str, List[str]]:
+        # Extract path parameters and query parameters from the URL template
+        path_params = []
+        query_params = []
+
+        # Extract path parameters
+        path_params = re.findall(r"\{([^}]+)\}", url_template)
+
+        # Parse the URL to extract query parameters
+        parsed_url = urlparse(url_template)
+        query_string = parsed_url.query
+
+        # Extract query parameters
+        if query_string:
+            query_params = list(parse_qs(query_string).keys())
+
+        return {"path_params": path_params, "query_params": query_params}
+
+    def _rename_columns_for_params(
+        self, df: pl.DataFrame, params: Dict[str, List[str]], query: str
+    ) -> pl.DataFrame:
+        input_data = {
+            "columns": df.columns,
+            "path_params": params["path_params"],
+            "query_params": params["query_params"],
+            "query": query,
+        }
+        prompt = f"""
+        Given the current DataFrame columns and the parameters needed for the URL template,
+        suggest how to rename the columns to match the required parameters.
+        Consider the query context when determining the best mapping.
+
+        Current columns: {input_data['columns']}
+        Required path parameters: {input_data['path_params']}
+        Required query parameters: {input_data['query_params']}
+        Query context: {input_data['query']}
+
+        Return a JSON object where keys are the current column names and values are the new names (matching the required parameters).
+        Only include columns that need to be renamed. The new names should match either path or query parameters.
+        """
+        rename_map = call_ai_model(input_data, prompt)
+
+        # Apply the renaming
+        all_params = params["path_params"] + params["query_params"]
+        for old_name, new_name in rename_map.items():
+            if old_name in df.columns and new_name in all_params:
+                df = df.rename({old_name: new_name})
+
+        return df
 
     def _identify_relevant_columns(
         self, data: pl.DataFrame, next_step: Dict[str, Any]
@@ -113,22 +188,22 @@ class Chain:
             Consider the query context when determining the best join strategy.
 
             Return a JSON object with the following structure:
-            {
+            {{
                 "join_type": ["inner", "outer", "left", "right"],
                 "join_instructions": [
-                    {
+                    {{
                         "df1_col": "column_name_from_df1",
                         "df2_col": "column_name_from_df2",
                         "transformation": "optional_transformation_instruction"
-                    }
+                    }}
                 ],
                 "additional_operations": [
-                    {
+                    {{
                         "dataframe": ["df1", "df2"],
                         "operation": "polars_operation_to_perform"
-                    }
+                    }}
                 ]
-            }
+            }}
 
             Dataframe 1 columns: {df1_columns}
             Dataframe 2 columns: {df2_columns}
@@ -175,7 +250,6 @@ class Chain:
             }
         except Exception as e:
             print(f"Error in _get_ai_join_instructions: {e}")
-            print("AI model response:", response)
             # Return a default join strategy
             return {
                 "join_type": "left",
