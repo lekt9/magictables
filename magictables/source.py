@@ -43,6 +43,15 @@ class Source:
     def add_route(self, route_name: str, url: str, query: str):
         self.magic_table.add_route(self.name, route_name, url, query)
 
+    def execute_batch(
+        self, input_data: pl.DataFrame, query: str, route_name: str, urls: pl.Series
+    ) -> pl.DataFrame:
+        results = []
+        for url in urls:
+            result = self.execute(input_data, query, route_name, url)
+            results.append(result)
+        return pl.concat(results)
+
     def execute(
         self,
         input_data: Optional[pl.DataFrame],
