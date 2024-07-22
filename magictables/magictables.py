@@ -8,6 +8,18 @@ import os
 import requests
 from magictables.utils import call_ai_model
 
+INTERNAL_COLUMNS = [
+    "data",
+    "embedding_id",
+    "source",
+    "target",
+    "relationship",
+    "source_name",
+    "route_name",
+    "identifier",
+    "cache_key",
+]
+
 
 class GraphNode:
     def __init__(
@@ -80,9 +92,17 @@ class MagicTable:
         text_representation = self._data_to_text(node.data)
         embedding = self._text_to_embedding(text_representation)
         self._index.append(embedding)
+
+        # Use the node's id if it exists, otherwise generate a new one
+        node_id = node.id if node.id else str(len(self._index))
+
         self.nodes.insert(
-            {"id": node.id, "data": node.data, "embedding_id": len(self._index) - 1}
+            {"id": node_id, "data": node.data, "embedding_id": len(self._index) - 1}
         )
+
+        # Update the node's id if it was newly generated
+        if not node.id:
+            node.id = node_id
 
     def add_edge(self, edge: GraphEdge):
         self.edges.insert(
@@ -97,7 +117,8 @@ class MagicTable:
         Node = Query()
         result = self.nodes.get(Node.id == node_id)
         if result:
-            return GraphNode(result["id"], result["data"], None)
+            # Use the id from the database, which is the same as the input node_id
+            return GraphNode(id=result["id"], data=result["data"], embedding=None)
         return None
 
     def get_neighbors(self, node_id: str) -> List[GraphNode]:
@@ -203,7 +224,8 @@ class MagicTable:
 
     def to_dataframe(self, table_name: str) -> pl.DataFrame:
         table = self.db.table(table_name)
-        return pl.DataFrame(table.all())
+        df = pl.DataFrame(table.all())
+        return df.select([col for col in df.columns if col not in INTERNAL_COLUMNS])
 
     def get_relationships(self, source: str) -> List[Dict[str, str]]:
         Edge = Query()
