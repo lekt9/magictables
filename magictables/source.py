@@ -50,36 +50,6 @@ class Source:
         self.routes[route_name] = {"url": url, "query": query}
         self.magic_table.add_route(self.name, route_name, url, query)
 
-    def _populate_url(self, url_template: str, input_data: Dict[str, Any]) -> str:
-        # Parse the URL template
-        parsed_url = urlparse(url_template)
-        path = parsed_url.path
-        query_params = parse_qs(parsed_url.query)
-
-        # Populate path parameters
-        for column, value in input_data.items():
-            placeholder = f"{{{column}}}"
-            if placeholder in path:
-                path = path.replace(placeholder, str(value))
-
-        # Populate query parameters
-        for param, values in query_params.items():
-            if (
-                len(values) > 0
-                and values[0].startswith("{")
-                and values[0].endswith("}")
-            ):
-                column = values[0][1:-1]  # Remove curly braces
-                if column in input_data:
-                    query_params[param] = [str(input_data[column])]
-
-        # Reconstruct the URL
-        populated_url = parsed_url._replace(
-            path=path, query=urlencode(query_params, doseq=True)
-        ).geturl()
-
-        return populated_url
-
     def _process_api_response(
         self, response_data: Dict[str, Any], query: str
     ) -> pl.DataFrame:
@@ -158,8 +128,6 @@ class Source:
     ) -> pl.DataFrame:
         magic_table = MagicTable.get_instance()
 
-        print("input_data", input_data)
-
         # If input_data is None, create an empty DataFrame
         if input_data is None:
             input_data = pl.DataFrame()
@@ -170,22 +138,18 @@ class Source:
         if cached_result is not None:
             return pl.DataFrame(cached_result)
 
-        try:
-            if self.source_type == "api":
-                result = self._execute_api(input_data, query, route_name)
-            # elif self.source_type == "web":
-            #     result = self._execute_web(input_data, query)
-            # elif self.source_type == "file":
-            #     result = self._execute_file(input_data, query)
-            # elif self.source_type == "search":
-            #     result = self._execute_search(input_data, query)
-            else:
-                raise ValueError(f"Unsupported source type: {self.source_type}")
-        except Exception as e:
-            print(f"Error executing {self.source_type} source: {str(e)}")
-            return pl.DataFrame()  # Return an empty DataFrame if execution fails
+        if self.source_type == "api":
+            result = self._execute_api(input_data, query, route_name)
+        # elif self.source_type == "web":
+        #     result = self._execute_web(input_data, query)
+        # elif self.source_type == "file":
+        #     result = self._execute_file(input_data, query)
+        # elif self.source_type == "search":
+        #     result = self._execute_search(input_data, query)
+        else:
+            raise ValueError(f"Unsupported source type: {self.source_type}")
 
-        # Convert the result_list to a DataFrame
+        # Convert the result to a DataFrame
         result_df = pl.DataFrame(result.data)
 
         # Store the contexts and responses
@@ -194,7 +158,6 @@ class Source:
 
         # Cache the result
         identifier = magic_table.predict_identifier(result_df)[0]
-        print("identifier", identifier)
         magic_table.cache_result(
             self.name, str(identifier), result_df.to_dict(as_series=False)
         )
@@ -202,20 +165,14 @@ class Source:
         # Store the result in the database
         magic_table.store_result(self.name, result_df)
 
-        print("result", result_df)
-
         return result_df
 
     def _execute_api(
         self,
-        input_data: Optional[pl.DataFrame],
+        input_data: pl.DataFrame,
         query: str,
         route_name: Optional[str] = None,
     ) -> ExecutionResult:
-        flattened_results = []
-        populated_urls = []
-        responses = []
-
         if route_name is None:
             raise ValueError("route_name must be provided for API execution")
 
@@ -225,12 +182,29 @@ class Source:
 
         url_template = route["url"]
 
-        # If input_data is None or empty, execute the API call once without parameters
-        if input_data is None or input_data.is_empty():
+        flattened_results = []
+        populated_urls = []
+        responses = []
+
+        # If input_data is empty, execute the API call once without parameters
+        if input_data.is_empty():
             populated_url = url_template
             populated_urls.append(populated_url)
 
-            try:
+            response = requests.get(
+                populated_url, headers={"Accept": "application/json"}, timeout=10
+            )
+            response.raise_for_status()
+            data = response.json()
+            flattened_data = flatten_nested_structure(data)
+            flattened_results.extend(flattened_data)
+            responses.append(response)
+        else:
+            # If input_data is not empty, iterate over its rows
+            for row in input_data.to_dicts():
+                populated_url = self._populate_url(url_template, row)
+                populated_urls.append(populated_url)
+
                 response = requests.get(
                     populated_url, headers={"Accept": "application/json"}, timeout=10
                 )
@@ -239,29 +213,6 @@ class Source:
                 flattened_data = flatten_nested_structure(data)
                 flattened_results.extend(flattened_data)
                 responses.append(response)
-            except Exception as e:
-                print(f"Error fetching API data: {str(e)}")
-                responses.append(None)
-        else:
-            # If input_data is not empty, iterate over its rows
-            for row in input_data.to_dicts():
-                populated_url = self._populate_url(url_template, row)
-                populated_urls.append(populated_url)
-
-                try:
-                    response = requests.get(
-                        populated_url,
-                        headers={"Accept": "application/json"},
-                        timeout=10,
-                    )
-                    response.raise_for_status()
-                    data = response.json()
-                    flattened_data = flatten_nested_structure(data)
-                    flattened_results.extend(flattened_data)
-                    responses.append(response)
-                except Exception as e:
-                    print(f"Error fetching API data: {str(e)}")
-                    responses.append(None)
 
         if not flattened_results:
             raise ValueError("No data returned from API")
@@ -269,6 +220,36 @@ class Source:
         return ExecutionResult(
             data=flattened_results, contexts=populated_urls, responses=responses
         )
+
+    def _populate_url(self, url_template: str, input_data: Dict[str, Any]) -> str:
+        # Parse the URL template
+        parsed_url = urlparse(url_template)
+        path = parsed_url.path
+        query_params = parse_qs(parsed_url.query)
+
+        # Populate path parameters
+        for column, value in input_data.items():
+            placeholder = f"{{{column}}}"
+            if placeholder in path:
+                path = path.replace(placeholder, str(value))
+
+        # Populate query parameters
+        for param, values in query_params.items():
+            if (
+                len(values) > 0
+                and values[0].startswith("{")
+                and values[0].endswith("}")
+            ):
+                column = values[0][1:-1]  # Remove curly braces
+                if column in input_data:
+                    query_params[param] = [str(input_data[column])]
+
+        # Reconstruct the URL
+        populated_url = parsed_url._replace(
+            path=path, query=urlencode(query_params, doseq=True)
+        ).geturl()
+
+        return populated_url
 
     # def _execute_web(self, input_data: pl.DataFrame, query: str) -> ExecutionResult:
     #     urls_to_scrape = self._determine_urls_to_scrape(input_data, query)

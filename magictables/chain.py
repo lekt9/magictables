@@ -1,5 +1,6 @@
 # chain.py
 
+from itertools import product
 import polars as pl
 from typing import List, Dict, Any, Optional
 from .source import Source
@@ -23,8 +24,6 @@ class Chain:
     def execute(self, input_data: Optional[pl.DataFrame] = None) -> pl.DataFrame:
         current_data = input_data if input_data is not None else pl.DataFrame()
 
-        print("self steps", self.steps)
-
         for step in self.steps:
             source = step["source"]
             query = step["query"]
@@ -42,28 +41,35 @@ class Chain:
                 url_template = route["url"]
                 params = self._extract_params_from_url_template(url_template)
 
-                # Rename columns if input data is not empty
-                if not current_data.is_empty():
-                    current_data = self._rename_columns_for_params(
-                        current_data, params, query
-                    )
-
-                # Execute the step
-                step_result = source.execute(
-                    input_data=current_data, query=query, route_name=route_name
+                # Generate rename options
+                rename_options = self._rename_columns_for_params(
+                    current_data, params, query
                 )
 
-                if isinstance(step_result, pl.DataFrame) and not step_result.is_empty():
-                    if current_data.is_empty():
-                        current_data = step_result
-                    else:
-                        current_data = self._merge_dataframes(
-                            current_data, step_result, query
+                # Try each rename option
+                for rename_map in rename_options:
+                    renamed_data = current_data.clone()
+                    for old_name, new_name in rename_map.items():
+                        if old_name in renamed_data.columns:
+                            renamed_data = renamed_data.rename({old_name: new_name})
+
+                    try:
+                        # Execute the step with the renamed data
+                        step_result = source.execute(
+                            input_data=renamed_data, query=query, route_name=route_name
                         )
+
+                        # If execution is successful, update current_data and break the loop
+                        current_data = step_result
+                        break
+                    except Exception as e:
+                        print(f"Execution failed with rename map {rename_map}: {e}")
+                        continue
+
+                # If all rename options fail, raise an exception
                 else:
-                    print(
-                        f"Warning: Step '{query}' returned no data or invalid result. Using previous data."
-                    )
+                    raise ValueError("All rename options failed for this step")
+
             except Exception as e:
                 print(f"Error executing step: {e}")
                 continue
@@ -96,7 +102,7 @@ class Chain:
 
     def _rename_columns_for_params(
         self, df: pl.DataFrame, params: Dict[str, List[str]], query: str
-    ) -> pl.DataFrame:
+    ) -> List[Dict[str, str]]:
         input_data = {
             "columns": df.columns,
             "path_params": params["path_params"],
@@ -105,26 +111,26 @@ class Chain:
         }
         prompt = f"""
         Given the current DataFrame columns and the parameters needed for the URL template,
-        suggest how to rename the columns to match the required parameters.
-        Consider the query context when determining the best mapping.
+        suggest multiple potential ways to rename the columns to match the required parameters.
+        Consider the query context when determining the best mappings.
 
         Current columns: {input_data['columns']}
         Required path parameters: {input_data['path_params']}
         Required query parameters: {input_data['query_params']}
         Query context: {input_data['query']}
 
-        Return a JSON object where keys are the current column names and values are the new names (matching the required parameters).
+        Return a JSON object where keys are the current column names and values are lists of potential new names (matching the required parameters).
         Only include columns that need to be renamed. The new names should match either path or query parameters.
         """
-        rename_map = call_ai_model(input_data, prompt)
+        rename_suggestions = call_ai_model(input_data, prompt)
 
-        # Apply the renaming
-        all_params = params["path_params"] + params["query_params"]
-        for old_name, new_name in rename_map.items():
-            if old_name in df.columns and new_name in all_params:
-                df = df.rename({old_name: new_name})
+        # Generate all possible combinations of rename mappings
+        rename_options = [
+            dict(zip(rename_suggestions.keys(), values))
+            for values in product(*rename_suggestions.values())
+        ]
 
-        return df
+        return rename_options
 
     def _identify_relevant_columns(
         self, data: pl.DataFrame, next_step: Dict[str, Any]
