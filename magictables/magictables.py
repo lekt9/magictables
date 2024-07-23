@@ -465,13 +465,16 @@ Your response should be in the following JSON format:
                 key_value = row[col]
                 url = url_template.format(**{col: key_value})
                 try:
-                    # Use from_api to fetch and process the data
-                    chained_table = await MagicTable.from_api(url, params=params)
-                    results[col] = chained_table
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(url, params=params) as response:
+                            data = await response.json()
+                    flattened_data = flatten_nested_structure(data)
+                    results = flattened_data[0] if flattened_data else {}
+                    results[key] = key_value  # Add the key to the results for joining
                 except Exception as e:
                     print(f"Error fetching data for {col}: {str(e)}")
-                    results[col] = None
-            return {**row, **results}
+                    results = {key: key_value}  # Ensure the key is always present
+            return results
 
         async def process_all_rows():
             tasks = [process_row(row) for row in self.to_dicts()]
@@ -480,23 +483,28 @@ Your response should be in the following JSON format:
         try:
             results = await process_all_rows()
 
-            # Flatten the results
-            flattened_results = []
-            for row in results:
-                flat_row = {}
-                for key, value in row.items():
-                    if isinstance(value, MagicTable):
-                        # If the value is a MagicTable, add its columns with a prefix
-                        for col in value.columns:
-                            flat_row[f"{key}_{col}"] = value[col].to_list()
-                    else:
-                        flat_row[key] = value
-                flattened_results.append(flat_row)
+            # Create a new DataFrame with the flattened API results
+            api_df = pl.DataFrame(results)
 
-            chained_df = MagicTable(flattened_results)
+            # Get the set of existing column names
+            existing_columns = set(self.columns)
 
-            # No need to join, as the results are already merged
-            return chained_df
+            # Keep only new columns and the key column from api_df
+            columns_to_keep = [
+                col
+                for col in api_df.columns
+                if col not in existing_columns or col == key
+            ]
+            api_df = api_df.select(columns_to_keep)
+
+            # Ensure the key column exists in both DataFrames
+            if key not in self.columns or key not in api_df.columns:
+                raise ValueError(f"Key column '{key}' not found in both DataFrames")
+
+            # Join the original DataFrame with the API results
+            joined_df = self.join(api_df, on=key, how="left")
+
+            return MagicTable(joined_df)
 
         except Exception as e:
             print(f"Error during chaining: {str(e)}")
