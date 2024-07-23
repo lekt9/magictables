@@ -10,7 +10,7 @@ API_KEY = os.getenv("TMDB_API_KEY")
 
 async def main():
     # Create a MagicTable instance
-    # mt = MagicTable()
+    mt = MagicTable()
     # await mt.clear_all_data()
 
     # Fetch popular movies

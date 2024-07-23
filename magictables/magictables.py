@@ -73,11 +73,14 @@ class MagicTable(pl.DataFrame):
 
     @classmethod
     async def from_api(
-        cls, api_url: str, params: Optional[Dict[str, Any]] = None
+        cls,
+        api_url: str,
+        params: Optional[Dict[str, Any]] = None,
+        include_embedding=False,
     ) -> "MagicTable":
         logger.debug(f"Attempting to retrieve data for API URL: {api_url}")
 
-        existing_data = await cls._get_existing_api_data(api_url)
+        existing_data = await cls._get_existing_api_data(api_url, include_embedding)
         if existing_data:
             logger.info(f"Found existing data for API URL: {api_url}")
             df = cls(existing_data)
@@ -116,60 +119,71 @@ class MagicTable(pl.DataFrame):
         sanitized_label = self._sanitize_label(label)
         logger.debug(f"Storing rows with label: {sanitized_label}, API URL: {api_url}")
 
-        async def process_row(row):
+        # Prepare all rows at once
+        rows = []
+        for row in self.to_dicts():
             standardized_row = self._standardize_data_types(row)
             node_id = self._generate_node_id(sanitized_label, standardized_row)
-
             combined_text = f"{api_description} {json.dumps(standardized_row)}"
             embedding = await self._generate_embedding(combined_text)
-
-            query = Query(
-                f"""
-                MERGE (a:APIEndpoint {{url: $api_url}})
-                SET a.description = $api_description
-                MERGE (d:{sanitized_label} {{id: $node_id}})
-                SET d += $row,
-                    d.embedding = $embedding
-                MERGE (d)-[:SOURCED_FROM]->(a)
-                """
+            rows.append(
+                {
+                    "node_id": node_id,
+                    "row": standardized_row,
+                    "embedding": embedding,
+                }
             )
-            return query, {
-                "node_id": node_id,
-                "row": standardized_row,
-                "embedding": embedding,
-                "api_url": api_url,
-                "api_description": api_description,
-            }
 
-        tasks = [process_row(row) for row in self.to_dicts()]
-        prepared_queries = await asyncio.gather(*tasks)
+        # Construct a single Cypher query for bulk insert
+        query = Query(
+            f"""
+            MERGE (a:APIEndpoint {{url: $api_url}})
+            SET a.description = $api_description
+            WITH a
+            UNWIND $rows AS row
+            MERGE (d:{sanitized_label} {{id: row.node_id}})
+            SET d += row.row,
+                d.embedding = row.embedding
+            MERGE (d)-[:SOURCED_FROM]->(a)
+            """  # type: ignore
+        )
 
         driver = await self._get_driver()
         async with driver.session() as session:
-            results = await asyncio.gather(
-                *[session.run(query, **params) for query, params in prepared_queries]
+            result = await session.run(
+                query, api_url=api_url, api_description=api_description, rows=rows
             )
-            logger.debug(f"Stored {len(results)} rows in Neo4j")
+            summary = await result.consume()
+            logger.debug(f"Stored {summary.counters.nodes_created} nodes in Neo4j")
 
     @classmethod
     async def _get_existing_api_data(
-        cls, api_url: str
+        cls, api_url: str, include_embedding: bool = False
     ) -> Optional[List[Dict[str, Any]]]:
         logger.debug(f"Attempting to retrieve existing data for API URL: {api_url}")
         instance = cls()
         driver = await instance._get_driver()
         async with driver.session() as session:
-            result = await session.run(
-                """
-                MATCH (n)-[:SOURCED_FROM]->(a:APIEndpoint {url: $api_url})
-                RETURN n
-                """,
-                api_url=api_url,
-            )
-            records = await result.fetch(n=-1)
-            if records:
-                logger.info(f"Found {len(records)} records for API URL: {api_url}")
-                return [dict(record["n"]) for record in records]
+            query = """
+            MATCH (n)-[:SOURCED_FROM]->(a:APIEndpoint {url: $api_url})
+            RETURN collect(n) as nodes
+            """
+            result = await session.run(query, api_url=api_url)
+            record = await result.single()
+            if record and record["nodes"]:
+                nodes = record["nodes"]
+                filtered_nodes = []
+                for node in nodes:
+                    filtered_node = {
+                        k: v
+                        for k, v in node.items()
+                        if (include_embedding or k != "embedding")
+                    }
+                    filtered_nodes.append(filtered_node)
+                logger.info(
+                    f"Found {len(filtered_nodes)} records for API URL: {api_url}"
+                )
+                return filtered_nodes
             else:
                 logger.warning(f"No records found for API URL: {api_url}")
         return None
