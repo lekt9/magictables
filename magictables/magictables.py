@@ -1,9 +1,11 @@
+import asyncio
 import os
+import aiohttp
 import dateparser
 import polars as pl
 import requests
 import json
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional, List, Tuple, Union
 from neo4j import GraphDatabase, Driver, Query, basic_auth
 import hashlib
 
@@ -61,11 +63,12 @@ class MagicTable(pl.DataFrame):
         return magic_df
 
     @classmethod
-    def from_api(
+    async def from_api(
         cls, api_url: str, params: Optional[Dict[str, Any]] = None
     ) -> "MagicTable":
-        response = requests.get(api_url, params=params)
-        data = response.json()
+        async with aiohttp.ClientSession() as session:
+            async with session.get(api_url, params=params) as response:
+                data = await response.json()
 
         data = flatten_nested_structure(data)
 
@@ -121,9 +124,9 @@ class MagicTable(pl.DataFrame):
             "Authorization": f"Bearer {self.jina_api_key}",
         }
         data = {
-            "model": "jina-clip-v1",
+            "model": "jina-embeddings-v2-base-en",
             "embedding_type": "float",
-            "input": [{"text": text}],
+            "input": [text],
         }
         response = requests.post(
             "https://api.jina.ai/v1/embeddings", headers=headers, json=data
@@ -221,7 +224,7 @@ class MagicTable(pl.DataFrame):
         # Generate a hash of the combined string
         return hashlib.md5(combined_string.encode()).hexdigest()
 
-    def _generate_cypher_query(self, natural_query: str) -> str:
+    async def _generate_cypher_query(self, natural_query: str) -> str:
         relevant_urls = self._search_relevant_api_urls(natural_query)
         query_key = self._generate_query_key(natural_query, relevant_urls)
 
@@ -276,16 +279,70 @@ class MagicTable(pl.DataFrame):
         Please provide a Cypher query for the given natural language query, considering the relevant API URLs, sample data, and column data types."""
 
         response = call_ai_model(sample_data, prompt)
-        cypher_query = response.get("cypher_query", "Error generating Cypher query")
-        self._store_cypher_query(query_key, cypher_query)
-
+        cypher_query = response.get("cypher_query")
+        if cypher_query:
+            self._store_cypher_query(query_key, cypher_query)
         return cypher_query
 
-    def join_with_query(self, natural_query: str) -> "MagicTable":
-        cypher_query = self._generate_cypher_query(natural_query)
+    async def join_with_query(self, natural_query: str) -> "MagicTable":
+        cypher_query = await self._generate_cypher_query(natural_query)
         result_df = self._execute_cypher(cypher_query)
         self._store_cypher_query_as_edge(natural_query, cypher_query)
-        return MagicTable(self.join(result_df, how="left"))
+
+        # Try to use the key column first
+        key_column = self._identify_key_column(
+            self.api_urls[-1]
+        )  # Assuming the last API URL is relevant
+
+        if key_column and key_column in result_df.columns:
+            join_columns = [key_column]
+        else:
+            # Fallback to AI-assisted column identification
+            join_columns = self._identify_join_columns(MagicTable(result_df))
+
+        if not join_columns:
+            raise ValueError("No suitable columns found for joining the DataFrames")
+
+        # Perform the join operation
+        joined_df = self.join(result_df, on=join_columns, how="left")
+
+        return MagicTable(joined_df)
+
+    def _identify_join_columns(self, result_df: "MagicTable") -> List[str]:
+        # Get a sample of both DataFrames
+        self_sample = self.head(5).to_dicts()
+        result_sample = result_df.head(5).to_dicts()
+
+        # Prepare column information
+        self_columns = {
+            col: str(dtype) for col, dtype in zip(self.columns, self.dtypes)
+        }
+        result_columns = {
+            col: str(dtype) for col, dtype in zip(result_df.columns, result_df.dtypes)
+        }
+
+        prompt = f"""Given two DataFrames, identify the best columns to use for joining them.
+
+        DataFrame 1 Columns and Types:
+        {json.dumps(self_columns, indent=2)}
+
+        DataFrame 1 Sample Data:
+        {json.dumps(self_sample, indent=2)}
+
+        DataFrame 2 Columns and Types:
+        {json.dumps(result_columns, indent=2)}
+
+        DataFrame 2 Sample Data:
+        {json.dumps(result_sample, indent=2)}
+
+        Please provide a list of column names that are best suited for joining these DataFrames.
+        Consider semantic similarity, data types, and potential primary key relationships.
+        Your response should be a JSON array of column names, without any additional text or explanation."""
+
+        response = call_ai_model(self_sample + result_sample, prompt)
+        join_columns = json.loads(response.get("join_columns", "[]"))
+
+        return join_columns
 
     def _execute_cypher(self, query: str, params: Dict[str, Any] = {}) -> pl.DataFrame:
         with self._get_driver().session() as session:
@@ -380,11 +437,11 @@ class MagicTable(pl.DataFrame):
         return list(set(labels))
 
     @classmethod
-    def from_query(cls, natural_query: str) -> "MagicTable":
+    async def from_query(cls, natural_query: str) -> "MagicTable":
         instance = cls()
-        cypher_query = instance._generate_cypher_query(natural_query)
+        cypher_query = await instance._generate_cypher_query(natural_query)
         result_df = instance._execute_cypher(cypher_query)
-        instance._store_cypher_query_as_edge(natural_query, cypher_query)
+        instance._store_cypher_query(natural_query, cypher_query)
         return cls(result_df)
 
     def _store_cypher_query(self, query_key: str, cypher_query: str):
@@ -410,3 +467,138 @@ class MagicTable(pl.DataFrame):
             stored_query = result.single()
 
         return stored_query[0] if stored_query else None
+
+    async def chain(
+        self,
+        api_url: Union[str, Dict[str, str]],
+        key: Optional[str] = None,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> "MagicTable":
+        """
+        Chain an API call for each row in the current MagicTable.
+
+        :param api_url: Either a string template for the API URL or a dictionary mapping column names to API URLs.
+        :param key: Optional. The column name to use for generating API URLs. If not provided, it will be identified automatically.
+        :param params: Optional parameters to include in the API request.
+        :return: A new MagicTable with the results of the chained API calls.
+        """
+        if isinstance(api_url, str):
+            if key is None:
+                key = self._identify_key_column(api_url)
+            api_url_dict = {key: api_url}
+        else:
+            api_url_dict = api_url
+
+        async def fetch_data(
+            session: aiohttp.ClientSession, url: str
+        ) -> Dict[str, Any]:
+            async with session.get(url, params=params) as response:
+                return await response.json()
+
+        async def process_row(
+            session: aiohttp.ClientSession, row: Dict[str, Any]
+        ) -> Dict[str, Any]:
+            results = {}
+            for col, url_template in api_url_dict.items():
+                key_value = row[col]
+                url = url_template.format(**{col: key_value})
+                data = await fetch_data(session, url)
+                results[col] = data
+            return {**row, **results}
+
+        async def fetch_all():
+            async with aiohttp.ClientSession() as session:
+                tasks = [process_row(session, row) for row in self.to_dicts()]
+                return await asyncio.gather(*tasks)
+
+        results = await fetch_all()
+        chained_df = MagicTable(results)
+
+        # Store the chained data in Neo4j
+        for col, url_template in api_url_dict.items():
+            label = f"Chained_{self._sanitize_label(col)}"
+            api_url = url_template.replace("{" + col + "}", f"<{col}>")
+            description = f"Chained API call for {col} from {api_url}"
+            embedding = self._generate_embedding(description)
+            chained_df._store_in_neo4j(label, api_url, description, embedding)
+
+        return chained_df
+
+    def _identify_key_column(self, api_url_template: str) -> str:
+        """
+        Identify the most suitable key column for the given API URL template.
+
+        :param api_url_template: The API URL template to analyze.
+        :return: The name of the identified key column.
+        """
+        # Extract placeholders from the API URL template
+        placeholders = [p.strip("{}") for p in api_url_template.split("{") if "}" in p]
+
+        # Get column information
+        column_info = {
+            col: {"dtype": str(dtype), "sample": self[col].head(5).to_list()}
+            for col, dtype in zip(self.columns, self.dtypes)
+        }
+
+        # Find matching columns for each placeholder
+        matches = {}
+        for placeholder in placeholders:
+            for col, info in column_info.items():
+                # Check if the column name is similar to the placeholder
+                if (
+                    placeholder.lower() in col.lower()
+                    or col.lower() in placeholder.lower()
+                ):
+                    matches[placeholder] = matches.get(placeholder, []) + [col]
+
+        # If we have a single match for a placeholder, return it
+        if len(matches) == 1 and len(next(iter(matches.values()))) == 1:
+            return next(iter(matches.values()))[0]
+
+        # If we have multiple matches or no matches, use AI to decide
+        if not matches or any(len(cols) > 1 for cols in matches.values()):
+            prompt = f"""Given the following API URL template and the current DataFrame structure, 
+            identify the most suitable column to use as a key for chaining API calls.
+
+            API URL Template: {api_url_template}
+
+            Placeholders: {placeholders}
+
+            DataFrame Columns and Types:
+            {json.dumps(column_info, indent=2)}
+
+            Potential Matches:
+            {json.dumps(matches, indent=2)}
+
+            Please provide the name of the column that best matches the placeholder in the API URL template.
+            Your response should be in the following JSON format:
+            {{"column_name": "example_column"}}
+            Replace "example_column" with the actual column name you identify as the best match."""
+
+            response = call_ai_model(column_info, prompt)
+            key_column = response.get("column_name")
+
+            if not key_column or key_column not in self.columns:
+                raise ValueError(
+                    f"Unable to identify a suitable key column for the given API URL template: {api_url_template}"
+                )
+
+            return key_column
+
+        # If we have a single match for each placeholder, return the first one
+        return next(iter(matches.values()))[0]
+
+    def clear_all_data(self):
+        """
+        Clear all data from the Neo4j database, including APIEndpoint nodes.
+        """
+        with self._get_driver().session() as session:
+            query = """
+            MATCH (n)
+            DETACH DELETE n
+            """
+
+            result = session.run(query)
+            deleted_count = result.consume().counters.nodes_deleted
+
+            print(f"Cleared all {deleted_count} nodes from the database.")
