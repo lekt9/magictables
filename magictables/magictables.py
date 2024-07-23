@@ -75,6 +75,18 @@ class MagicTable(pl.DataFrame):
     async def from_api(
         cls, api_url: str, params: Optional[Dict[str, Any]] = None
     ) -> "MagicTable":
+        logger.debug(f"Attempting to retrieve data for API URL: {api_url}")
+
+        existing_data = await cls._get_existing_api_data(api_url)
+        if existing_data:
+            logger.info(f"Found existing data for API URL: {api_url}")
+            df = cls(existing_data)
+            df.api_urls.append(api_url)
+            return df._parse_json_fields()
+        else:
+            logger.warning(f"No existing data found for API URL: {api_url}")
+
+        # If data doesn't exist, proceed with API call and storage
         async with aiohttp.ClientSession() as session:
             async with session.get(api_url, params=params) as response:
                 data = await response.json()
@@ -90,10 +102,9 @@ class MagicTable(pl.DataFrame):
             else path_parts[-2].capitalize()
         )
 
-        # Generate API description
         api_description = await df._generate_api_description(api_url, data[:1])
 
-        # Store rows with API metadata and combined embeddings
+        logger.debug(f"Storing data for API URL: {api_url}")
         await df._store_rows_in_neo4j(label, api_url, api_description)
 
         df.api_urls.append(api_url)
@@ -103,6 +114,7 @@ class MagicTable(pl.DataFrame):
         self, label: str, api_url: str, api_description: str
     ):
         sanitized_label = self._sanitize_label(label)
+        logger.debug(f"Storing rows with label: {sanitized_label}, API URL: {api_url}")
 
         async def process_row(row):
             standardized_row = self._standardize_data_types(row)
@@ -113,12 +125,13 @@ class MagicTable(pl.DataFrame):
 
             query = Query(
                 f"""
+                MERGE (a:APIEndpoint {{url: $api_url}})
+                SET a.description = $api_description
                 MERGE (d:{sanitized_label} {{id: $node_id}})
                 SET d += $row,
-                    d.embedding = $embedding,
-                    d.api_url = $api_url,
-                    d.api_description = $api_description
-                """  # type: ignore
+                    d.embedding = $embedding
+                MERGE (d)-[:SOURCED_FROM]->(a)
+                """
             )
             return query, {
                 "node_id": node_id,
@@ -128,16 +141,38 @@ class MagicTable(pl.DataFrame):
                 "api_description": api_description,
             }
 
-        # Generate all embeddings and prepare queries concurrently
         tasks = [process_row(row) for row in self.to_dicts()]
         prepared_queries = await asyncio.gather(*tasks)
 
-        # Execute all Neo4j queries concurrently
         driver = await self._get_driver()
         async with driver.session() as session:
-            await asyncio.gather(
+            results = await asyncio.gather(
                 *[session.run(query, **params) for query, params in prepared_queries]
             )
+            logger.debug(f"Stored {len(results)} rows in Neo4j")
+
+    @classmethod
+    async def _get_existing_api_data(
+        cls, api_url: str
+    ) -> Optional[List[Dict[str, Any]]]:
+        logger.debug(f"Attempting to retrieve existing data for API URL: {api_url}")
+        instance = cls()
+        driver = await instance._get_driver()
+        async with driver.session() as session:
+            result = await session.run(
+                """
+                MATCH (n)-[:SOURCED_FROM]->(a:APIEndpoint {url: $api_url})
+                RETURN n
+                """,
+                api_url=api_url,
+            )
+            records = await result.fetch(n=-1)
+            if records:
+                logger.info(f"Found {len(records)} records for API URL: {api_url}")
+                return [dict(record["n"]) for record in records]
+            else:
+                logger.warning(f"No records found for API URL: {api_url}")
+        return None
 
     async def _generate_api_description(
         self, api_url: str, data: List[Dict[str, Any]]
@@ -452,89 +487,93 @@ Your response should be in the following JSON format:
         return MagicTable(result_df)
 
     async def _generate_and_execute_pandas_code(
-        self, pandas_df: pd.DataFrame, query: str
+        self, pandas_df: pd.DataFrame, natural_query: str
     ) -> pd.DataFrame:
-        # Get a sample of the DataFrame (e.g., first 5 rows)
-        sample_data = pandas_df.head(5).to_dict(orient="records")
+        query_key = self._generate_query_key(natural_query, [])
 
-        prompt = f"""Given the following pandas DataFrame structure and the query, generate Python code to process or analyze the data using pandas.
+        # Check if we have stored pandas code
+        stored_code = await self._get_stored_pandas_code(query_key)
+        if stored_code:
+            pandas_code = stored_code
+        else:
+            prompt = f"""Given the following pandas DataFrame structure and the query, generate Python code to process or analyze the data using pandas.
 
-What we are trying to achieve:
-Find popular movies with a vote average greater than 7.5 and list their cast members who are older than 40
+    What we are trying to achieve: {natural_query}
+    Find popular movies with a vote average greater than 7.5 and list their cast members who are older than 40
 
-Current DataFrame you must only work with:
-DataFrame Structure:
-Columns: {pandas_df.columns.tolist()}
-Shape: {pandas_df.shape}
-Data Types:
-{pandas_df.dtypes}
+    Current DataFrame you must only work with:
+    DataFrame Structure:
+    Columns: {pandas_df.columns.tolist()}
+    Shape: {pandas_df.shape}
+    Data Types:
+    {pandas_df.dtypes}
 
-Sample Data (first 5 rows):
-{pandas_df.head(10).to_string()}
+    Sample Data (first 5 rows):
+    {pandas_df.head(10).to_string()}
 
-Please provide Python code to process this DataFrame, adhering to the following guidelines:
-1. Only use columns that exist in the DataFrame. Do not reference any columns not listed above.
-2. Ensure all operations are efficient and use pandas vectorized operations where possible.
-3. Handle potential data type issues, especially for date/time columns or numeric calculations.
-4. The code should return a pandas DataFrame as the result.
-5. Do not include any print statements or comments in the code.
-6. The input DataFrame is named 'df'.
-7. If the DataFrame is empty or missing required columns, create a sample DataFrame with the necessary columns.
-8. When working with dates, always use pd.to_datetime() for conversion and handle potential errors.
-9. For age calculations, use a method that works across different pandas versions, avoiding timedelta conversions to years.
-10. You MUST only use pandas and no other libraries.
+    Please provide Python code to process this DataFrame, adhering to the following guidelines:
+    1. Only use columns that exist in the DataFrame. Do not reference any columns not listed above.
+    2. Ensure all operations are efficient and use pandas vectorized operations where possible.
+    3. Handle potential data type issues, especially for date/time columns or numeric calculations.
+    4. The code should return a pandas DataFrame as the result.
+    5. Do not include any print statements or comments in the code.
+    6. The input DataFrame is named 'df'.
+    7. If the DataFrame is empty or missing required columns, create a sample DataFrame with the necessary columns.
+    8. When working with dates, always use pd.to_datetime() for conversion and handle potential errors.
+    9. For age calculations, use a method that works across different pandas versions, avoiding timedelta conversions to years.
+    10. You MUST only use pandas and no other libraries.
 
-These are merely EXAMPLES of code. They do NOT apply to the dataframe above:
+    These are merely EXAMPLES of code. They do NOT apply to the dataframe above:
 
-1. Query: "Calculate the average price for each category"
-{{"pandas_code": "
-if df.empty or 'category' not in df.columns or 'price' not in df.columns:
-    df = pd.DataFrame({{'category': ['A', 'B', 'A', 'C'], 'price': [10, 20, 15, 25]}})
-result = df.groupby('category')['price'].mean().reset_index()
-"}}
+    1. Query: "Calculate the average price for each category"
+    {{"pandas_code": "
+    if df.empty or 'category' not in df.columns or 'price' not in df.columns:
+        df = pd.DataFrame({{'category': ['A', 'B', 'A', 'C'], 'price': [10, 20, 15, 25]}})
+    result = df.groupby('category')['price'].mean().reset_index()
+    "}}
 
-2. Query: "Find the top 5 products by sales volume"
-{{"pandas_code": "
-if df.empty or 'product' not in df.columns or 'sales_volume' not in df.columns:
-    df = pd.DataFrame({{'product': ['P1', 'P2', 'P3', 'P4', 'P5', 'P6'], 'sales_volume': [100, 150, 80, 200, 120, 90]}})
-result = df.sort_values('sales_volume', ascending=False).head(5)
-"}}
+    2. Query: "Find the top 5 products by sales volume"
+    {{"pandas_code": "
+    if df.empty or 'product' not in df.columns or 'sales_volume' not in df.columns:
+        df = pd.DataFrame({{'product': ['P1', 'P2', 'P3', 'P4', 'P5', 'P6'], 'sales_volume': [100, 150, 80, 200, 120, 90]}})
+    result = df.sort_values('sales_volume', ascending=False).head(5)
+    "}}
 
-3. Query: "Find popular movies with a vote average greater than 7.5 and list their cast members who are older than 40"
-{{"pandas_code": "
-if df.empty or 'movie_title' not in df.columns or 'vote_average' not in df.columns or 'cast_name' not in df.columns or 'birth_date' not in df.columns:
-    df = pd.DataFrame({{
-        'movie_title': ['Movie A', 'Movie B', 'Movie C', 'Movie D'],
-        'vote_average': [8.0, 7.2, 7.8, 7.9],
-        'cast_name': ['Actor 1', 'Actor 2', 'Actor 3', 'Actor 4'],
-        'birth_date': ['1970-01-01', '1985-01-01', '1960-01-01', '1975-01-01']
-    }})
+    3. Query: "Find popular movies with a vote average greater than 7.5 and list their cast members who are older than 40"
+    {{"pandas_code": "
+    if df.empty or 'movie_title' not in df.columns or 'vote_average' not in df.columns or 'cast_name' not in df.columns or 'birth_date' not in df.columns:
+        df = pd.DataFrame({{
+            'movie_title': ['Movie A', 'Movie B', 'Movie C', 'Movie D'],
+            'vote_average': [8.0, 7.2, 7.8, 7.9],
+            'cast_name': ['Actor 1', 'Actor 2', 'Actor 3', 'Actor 4'],
+            'birth_date': ['1970-01-01', '1985-01-01', '1960-01-01', '1975-01-01']
+        }})
 
-df['vote_average'] = pd.to_numeric(df['vote_average'], errors='coerce')
-df['birth_date'] = pd.to_datetime(df['birth_date'], errors='coerce')
-current_date = pd.Timestamp.now()
-df['age'] = current_date.year - df['birth_date'].dt.year - ((current_date.month * 100 + current_date.day) < (df['birth_date'].dt.month * 100 + df['birth_date'].dt.day))
+    df['vote_average'] = pd.to_numeric(df['vote_average'], errors='coerce')
+    df['birth_date'] = pd.to_datetime(df['birth_date'], errors='coerce')
+    current_date = pd.Timestamp.now()
+    df['age'] = current_date.year - df['birth_date'].dt.year - ((current_date.month * 100 + current_date.day) < (df['birth_date'].dt.month * 100 + df['birth_date'].dt.day))
 
-popular_movies = df[df['vote_average'] > 7.5]
-older_cast = df[df['age'] > 40]
+    popular_movies = df[df['vote_average'] > 7.5]
+    older_cast = df[df['age'] > 40]
 
-result = popular_movies.merge(older_cast, on=['movie_title', 'cast_name'], suffixes=('_movie', '_cast'))
-result = result[['movie_title', 'vote_average', 'cast_name', 'age']].drop_duplicates()
-result = result.sort_values(['vote_average', 'age'], ascending=[False, False])
-"}}
+    result = popular_movies.merge(older_cast, on=['movie_title', 'cast_name'], suffixes=('_movie', '_cast'))
+    result = result[['movie_title', 'vote_average', 'cast_name', 'age']].drop_duplicates()
+    result = result.sort_values(['vote_average', 'age'], ascending=[False, False])
+    "}}
 
-Your response should be in the following JSON format:
-{{"pandas_code": "Your Python code here"}}
-"""
-        response = await call_ai_model(
-            [],
-            prompt,
-            model="openrouter/anthropic/claude-3.5-sonnet:beta",
-        )
+    Your response should be in the following JSON format:
+    {{"pandas_code": "Your Python code here"}}
+    """
+            response = await call_ai_model(
+                [],
+                prompt,
+                model="openrouter/anthropic/claude-3.5-sonnet:beta",
+            )
 
-        pandas_code = response.get("pandas_code", "df")
+            pandas_code = response.get("pandas_code", "df")
 
-        logger.debug(f"Generated pandas code: {pandas_code}")
+            logger.debug(f"Generated pandas code: {pandas_code}")
 
         # Execute the generated code
         try:
@@ -546,6 +585,8 @@ Your response should be in the following JSON format:
             logger.debug(
                 f"Pandas code executed successfully. Result shape: {result.shape}"
             )
+            await self._store_pandas_query(natural_query, pandas_code)
+
             return result
         except Exception as e:
             logger.error(f"Error executing pandas code: {str(e)}")
@@ -862,10 +903,12 @@ Your response should be in the following JSON format:
             for node_label in involved_nodes:
                 await session.run(
                     f"""
-                    MATCH (q:QueryNode {{query: $natural_query}}), (n:{node_label})
+                    MATCH (q:QueryNode {{key: $query_key}}), (n:{node_label})
                     MERGE (q)-[r:QUERIES]->(n)
-                    SET r.cypher_query = $cypher_query
+                    SET r.natural_query = $natural_query,
+                        r.cypher_query = $cypher_query
                     """,  # type: ignore
+                    query_key=query_key,
                     natural_query=natural_query,
                     cypher_query=cypher_query,
                 )
@@ -887,8 +930,9 @@ Your response should be in the following JSON format:
         async with driver.session() as session:
             result = await session.run(
                 """
-                MATCH (q:QueryNode {key: $query_key})
-                RETURN q.cypher_query
+                MATCH (q:QueryNode {key: $query_key})-[r:QUERIES]->()
+                RETURN r.cypher_query
+                LIMIT 1
                 """,
                 query_key=query_key,
             )
@@ -915,3 +959,35 @@ Your response should be in the following JSON format:
             # Handle the exception if needed
             print(f"An error occurred: {exc_type.__name__}: {exc_val}")
         return False  # Propagate exceptions
+
+    async def _store_pandas_query(self, natural_query: str, pandas_code: str):
+        query_key = self._generate_query_key(
+            natural_query, []
+        )  # No relevant URLs for pandas queries
+
+        driver = await self._get_driver()
+        async with driver.session() as session:
+            await session.run(
+                """
+                MERGE (q:QueryNode {key: $query_key})
+                SET q.natural_query = $natural_query,
+                    q.pandas_code = $pandas_code
+                """,
+                query_key=query_key,
+                natural_query=natural_query,
+                pandas_code=pandas_code,
+            )
+
+    async def _get_stored_pandas_code(self, query_key: str) -> Optional[str]:
+        driver = await self._get_driver()
+        async with driver.session() as session:
+            result = await session.run(
+                """
+                MATCH (q:QueryNode {key: $query_key})
+                RETURN q.pandas_code
+                """,
+                query_key=query_key,
+            )
+            stored_code = await result.single()
+
+        return stored_code[0] if stored_code else None

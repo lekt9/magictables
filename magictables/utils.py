@@ -89,7 +89,7 @@ async def call_ai_model(
         },
     ]
     try:
-        # print("input", messages)
+        print("input", messages)
         response = await acompletion(model=model_to_use, messages=messages)
         response_content = response.choices[0].message.content
         if "```json" in response_content:

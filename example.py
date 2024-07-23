@@ -10,8 +10,8 @@ API_KEY = os.getenv("TMDB_API_KEY")
 
 async def main():
     # Create a MagicTable instance
-    mt = MagicTable()
-    await mt.clear_all_data()
+    # mt = MagicTable()
+    # await mt.clear_all_data()
 
     # Fetch popular movies
     print("\nFetching popular movies...")
@@ -25,6 +25,7 @@ async def main():
     movie_details = await popular_movies.chain(
         api_url=f"https://api.themoviedb.org/3/movie/{{id}}?api_key={API_KEY}",
     )
+    print(movie_details)
     # Example of using from_query to combine data from multiple chained calls
     print("\nQuerying across chained data...")
     result = await movie_details.transform(
