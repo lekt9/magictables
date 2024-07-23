@@ -1,5 +1,7 @@
 import logging
 
+from magictables.hybrid_driver import HybridDriver
+
 # Set up logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
@@ -10,9 +12,8 @@ import dateparser
 import polars as pl
 import json
 from typing import Dict, Any, Optional, List, Tuple, Union
-from neo4j import Query, basic_auth
+from neo4j import Query
 import hashlib
-from neo4j import AsyncGraphDatabase, AsyncDriver, basic_auth
 
 from magictables.utils import call_ai_model, flatten_nested_structure
 from dotenv import load_dotenv
@@ -33,19 +34,15 @@ class MagicTable(pl.DataFrame):
         self.api_urls = []
         self._driver = None
 
-    async def _get_driver(self) -> AsyncDriver:
+    async def _get_driver(self) -> HybridDriver:
         if self._driver is None:
             parsed_uri = urllib.parse.urlparse(self.neo4j_uri)
             scheme = parsed_uri.scheme
-            if scheme in ["bolt", "neo4j", "bolt+s"]:
-                self._driver = AsyncGraphDatabase.driver(
-                    self.neo4j_uri, auth=(self.neo4j_user, self.neo4j_password)
+            if scheme in ["bolt", "neo4j", "bolt+s", "http", "https"]:
+                self._driver = HybridDriver(
+                    self.neo4j_uri, self.neo4j_user, self.neo4j_password
                 )
-            elif scheme in ["http", "https"]:
-                self._driver = AsyncGraphDatabase.driver(
-                    self.neo4j_uri,
-                    auth=basic_auth(self.neo4j_user, self.neo4j_password),
-                )
+                await self._driver._load_cache()
             else:
                 raise ValueError(f"Unsupported URI scheme: {scheme}")
         return self._driver
@@ -56,11 +53,16 @@ class MagicTable(pl.DataFrame):
             self._driver = None
 
     async def __aenter__(self):
-        await self._get_driver()
+        self._driver = await self._get_driver()
         return self
 
     def __del__(self):
-        asyncio.create_task(self._close_driver())
+        if self._driver:
+            logging.warning(
+                "MagicTable instance is being destroyed without properly closing the driver. "
+                "This may lead to resource leaks. Please use 'await magic_table.close()' "
+                "to properly close the driver."
+            )
 
     @classmethod
     async def from_polars(cls, df: pl.DataFrame, label: str) -> "MagicTable":

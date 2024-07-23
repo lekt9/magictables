@@ -21,6 +21,8 @@ bs4 = "^0.0.2"
 scikit-learn = "^1.5.1"
 neo4j = "^5.22.0"
 pyarrow = "^17.0.0"
+py2neo = "^2021.2.4"
+aiofiles = "^24.1.0"
 
 
 [build-system]
