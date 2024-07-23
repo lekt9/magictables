@@ -179,50 +179,89 @@ class HybridSession:
             self._neo4j_session = await neo4j_driver.session(**self.kwargs).__aenter__()
         return self._neo4j_session
 
+    async def close(self):
+        if self._neo4j_session:
+            await self._neo4j_session.__aexit__(None, None, None)
+            self._neo4j_session = None
+
     async def run(self, query: str, parameters: Dict[str, Any] = None, **kwargs):
-        start_time = time.time()
-        cache_used = False
-        if not self.driver._data:
-            await self.driver._load_cache()
-
-        query_str = query.text if isinstance(query, Query) else query
-
-        # Check if the query is a MATCH query that we can handle with the cache
-        if "MATCH" in query_str:
-            try:
-                node_type = query_str.split("(")[1].split(":")[1].split(")")[0]
-                cached_data = self.driver._data.get(node_type, [])
-                if cached_data:
-                    cache_used = True
-                    end_time = time.time()
-                    logging.info(
-                        f"Cache hit for node type '{node_type}'. Query executed in {end_time - start_time:.4f} seconds."
-                    )
-                    return HybridResult(cached_data)
-            except IndexError:
-                # If we can't parse the node type, we'll fall back to using the database
-                pass
-
-        # If cache is empty or query can't be handled by cache, use Neo4j
         neo4j_session = await self._get_neo4j_session()
-        result = await neo4j_session.run(query, parameters, **kwargs)
+        return await neo4j_session.run(query, parameters, **kwargs)
 
-        # Store the result in the cache if it's a MATCH query
-        if "MATCH" in query_str:
-            try:
-                node_type = query_str.split("(")[1].split(":")[1].split(")")[0]
-                data = await result.data()
-                self.driver._data[node_type] = data
-                await self.driver._save_cache()
-            except IndexError:
-                # If we can't parse the node type, we won't cache the result
-                pass
+
+async def run(self, query: str, parameters: Dict[str, Any] = None, **kwargs):
+    start_time = time.time()
+    cache_used = False
+    if not self.driver._data:
+        await self.driver._load_cache()
+
+    query_str = query.text if isinstance(query, Query) else query
+
+    # Check if the query is a MATCH query that we can handle with the cache
+    if "MATCH" in query_str:
+        try:
+            node_type = query_str.split("(")[1].split(":")[1].split(")")[0]
+            cached_data = self.driver._data.get(node_type, [])
+            if cached_data:
+                cache_used = True
+                end_time = time.time()
+                logging.info(
+                    f"Cache hit for node type '{node_type}'. Query executed in {end_time - start_time:.4f} seconds."
+                )
+                return HybridResult(cached_data)
+        except IndexError:
+            # If we can't parse the node type, we'll fall back to using the database
+            pass
+
+        # Try to use Neo4j, but fall back to cache if connection fails
+        try:
+            neo4j_session = await self._get_neo4j_session()
+            result = await neo4j_session.run(query, parameters, **kwargs)
+            data = await result.data()
+
+            # Store the result in the cache if it's a MATCH query
+            if "MATCH" in query_str:
+                try:
+                    node_type = query_str.split("(")[1].split(":")[1].split(")")[0]
+                    self.driver._data[node_type] = data
+                    await self.driver._save_cache()
+                except IndexError:
+                    # If we can't parse the node type, we won't cache the result
+                    pass
+        except Exception as e:
+            logging.error(
+                f"Failed to connect to Neo4j: {str(e)}. Falling back to cache."
+            )
+            # Fall back to cache
+            if "MATCH" in query_str:
+                try:
+                    node_type = query_str.split("(")[1].split(":")[1].split(")")[0]
+                    cached_data = self.driver._data.get(node_type, [])
+                    if cached_data:
+                        cache_used = True
+                        data = cached_data
+                    else:
+                        logging.warning(
+                            f"No cache data available for node type '{node_type}'."
+                        )
+                        data = []
+                except IndexError:
+                    logging.warning(
+                        "Failed to parse node type from query. Returning empty result."
+                    )
+                    data = []
+            else:
+                logging.warning(
+                    "Non-MATCH query failed and cannot be served from cache. Returning empty result."
+                )
+                data = []
+
         end_time = time.time()
         execution_time = end_time - start_time
-        cache_status = "Cache miss" if not cache_used else "Cache not applicable"
+        cache_status = "Cache hit" if cache_used else "Cache miss"
         logging.info(f"{cache_status}. Query executed in {execution_time:.4f} seconds.")
 
-        return HybridResult(await result.data())
+        return HybridResult(data)
 
     async def close(self):
         if self._neo4j_session:

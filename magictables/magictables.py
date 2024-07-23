@@ -959,7 +959,7 @@ Your response should be in the following JSON format:
         await self._close_driver()
         if exc_type:
             # Handle the exception if needed
-            # print(f"An error occurred: {exc_type.__name__}: {exc_val}")
+            print(f"An error occurred: {exc_type.__name__}: {exc_val}")
         return False  # Propagate exceptions
 
     async def _store_pandas_query(self, natural_query: str, pandas_code: str):
