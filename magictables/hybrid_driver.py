@@ -166,6 +166,7 @@ class HybridSession:
         self.driver = driver
         self.kwargs = kwargs
         self._neo4j_session = None
+        self._use_cache_only = False
 
     async def __aenter__(self):
         return self
