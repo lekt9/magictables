@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "magictables"
-version = "1.0.3"
+version = "1.0.4"
 description = "An advanced Python library designed to streamline data preparation and exploration for data scientists"
 authors = ["Lewis <lewis@magictables.org>"]
 license = "GPL-3.0"
@@ -11,7 +11,6 @@ python = ">=3.9,<3.11"
 requests = "^2.32.3"
 python-dotenv = "^1.0.1"
 polars = "^1.2.1"
-polars-lts-cpu = "^1.2.1"
 dateparser = "^1.2.0"
 litellm = "^1.41.25"
 parsee-pdf-reader = "^0.1.6.0"
@@ -21,6 +20,9 @@ scikit-learn = "^1.5.1"
 neo4j = "^5.22.0"
 pyarrow = "^17.0.0"
 aiofiles = "^24.1.0"
+
+[tool.poetry.group.m1mac.dependencies]
+polars-lts-cpu = { version = "^1.2.1", platform = "darwin", markers = "platform_machine == 'arm64'" }
 
 [build-system]
 requires = ["poetry-core"]
