@@ -1,9 +1,9 @@
 [tool.poetry]
-name = "magictable"
+name = "magictables"
 version = "1.0.0"
-description = "Simplifies ETL and Data Engineering workflows so you can focus on the Data Science work that matters"
+description = "An advanced Python library designed to streamline data preparation and exploration for data scientists"
 authors = ["Lewis <lewis@magictables.org>"]
-license = "MIT"
+license = "GPL-3.0"
 readme = "README.md"
 
 [tool.poetry.dependencies]
@@ -21,7 +21,6 @@ scikit-learn = "^1.5.1"
 neo4j = "^5.22.0"
 pyarrow = "^17.0.0"
 aiofiles = "^24.1.0"
-
 
 [build-system]
 requires = ["poetry-core"]
