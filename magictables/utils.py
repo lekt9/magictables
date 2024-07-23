@@ -34,17 +34,40 @@ os.environ["OR_APP_NAME"] = "MagicTables"  # optional
 def flatten_nested_structure(nested_structure):
     flattened_rows = []
 
-    if isinstance(nested_structure, dict) and "results" in nested_structure:
-        top_level_info = {k: v for k, v in nested_structure.items() if k != "results"}
-        for item in nested_structure["results"]:
-            row = top_level_info.copy()
-            row.update(item)
-            flattened_rows.append(row)
+    if isinstance(nested_structure, dict):
+        # Separate top-level items and nested items
+        top_level_items = {
+            k: v for k, v in nested_structure.items() if not isinstance(v, (dict, list))
+        }
+        nested_items = {
+            k: v for k, v in nested_structure.items() if isinstance(v, (dict, list))
+        }
+
+        if nested_items:
+            for key, value in nested_items.items():
+                if isinstance(value, list):
+                    for item in value:
+                        row = top_level_items.copy()
+                        if isinstance(item, dict):
+                            row.update(item)
+                        else:
+                            row[key] = item
+                        flattened_rows.append(row)
+                elif isinstance(value, dict):
+                    row = top_level_items.copy()
+                    row.update(value)
+                    flattened_rows.append(row)
+        else:
+            flattened_rows.append(top_level_items)
+    elif isinstance(nested_structure, list):
+        for item in nested_structure:
+            flattened_rows.extend(flatten_nested_structure(item))
     else:
-        # Fallback for other structures, though this case shouldn't occur with your data
         flattened_rows.append(nested_structure)
 
     return flattened_rows
+
+
 
 
 async def call_ai_model(
