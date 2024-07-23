@@ -89,18 +89,18 @@ async def call_ai_model(
         },
     ]
     try:
-        print("input", messages)
+        # print("input", messages)
         response = await acompletion(model=model_to_use, messages=messages)
         response_content = response.choices[0].message.content
         if "```json" in response_content:
             json_str = response_content.replace("```json", "```").split("```")[1]
         else:
             json_str = response_content
-        print("str", json_str)
+        # print("str", json_str)
 
         # Use json.loads() with a custom parser to handle newlines
         result = json.loads(json_str, parse_constant=lambda x: x.strip())
-        print("output", result)
+        # print("output", result)
         logging.debug(f"Parsed JSON result: {result}")
         return result
     except (KeyError, json.JSONDecodeError) as e:

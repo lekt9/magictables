@@ -580,7 +580,7 @@ Your response should be in the following JSON format:
                 else:
                     return {"nodes": [], "relationships": []}
             except Exception as e:
-                print(f"Error retrieving database schema: {str(e)}")
+                # print(f"Error retrieving database schema: {str(e)}")
                 return {"nodes": [], "relationships": []}
 
     def _process_schema_node(self, node):
@@ -657,7 +657,7 @@ Your response should be in the following JSON format:
                         for item in results:
                             item[key] = key_value
                 except Exception as e:
-                    print(f"Error fetching data for {col}: {str(e)}")
+                    # print(f"Error fetching data for {col}: {str(e)}")
                     results.append({key: key_value})
             return results
 
@@ -696,7 +696,7 @@ Your response should be in the following JSON format:
             return MagicTable(joined_df)
 
         except Exception as e:
-            print(f"Error during chaining: {str(e)}")
+            # print(f"Error during chaining: {str(e)}")
             return self  # Return the original DataFrame if chaining fails
 
     @staticmethod
