@@ -269,7 +269,17 @@ LLM_PROVIDER=openai
 
 Make sure to add `.env` to your `.gitignore` file to avoid exposing sensitive information.
 
-Note: If you don't want to use Neo4j for persistent storage, MagicTables will fall back to in-memory storage. However, some features like caching and cross-session data persistence will not be available.
+## Fallback Behavior
+
+When Neo4j is not configured or unavailable, MagicTables uses a hybrid driver that falls back to in-memory storage with JSON-based caching. This allows basic functionality to continue working, but with some limitations:
+
+1. Data persistence is limited to what can be efficiently stored in JSON format.
+2. Complex graph operations that rely on Neo4j's capabilities are not available.
+3. Performance may degrade for large datasets compared to using Neo4j.
+4. Cross-session persistence is limited to the data that can be saved in the cache file.
+
+To get the full benefits of MagicTables, including efficient caching, complex graph operations, and robust cross-session persistence, it's recommended to set up and use Neo4j as described in the Configuration section.
+
 
 ## Contributing
 
