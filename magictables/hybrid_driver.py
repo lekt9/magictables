@@ -9,7 +9,7 @@ from typing import List, Dict, Any, Optional
 import aiofiles
 from neo4j import AsyncDriver, AsyncGraphDatabase, Query, basic_auth
 
-logging.basicConfig(filename="example.log", level=logging.DEBUG)
+# logging.basicConfig(filename="example.log", level=logging.DEBUG)
 
 
 class HybridResult:
