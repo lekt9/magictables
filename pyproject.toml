@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "magictable"
-version = "0.5.0"
+version = "1.0.0"
 description = "Simplifies ETL and Data Engineering workflows so you can focus on the Data Science work that matters"
 authors = ["Lewis <lewis@magictables.org>"]
 license = "MIT"
@@ -15,13 +15,11 @@ polars-lts-cpu = "^1.2.1"
 dateparser = "^1.2.0"
 litellm = "^1.41.25"
 parsee-pdf-reader = "^0.1.6.0"
-cozo-embedded = "^0.7.6"
 pandas = "^2.2.2"
 bs4 = "^0.0.2"
 scikit-learn = "^1.5.1"
 neo4j = "^5.22.0"
 pyarrow = "^17.0.0"
-py2neo = "^2021.2.4"
 aiofiles = "^24.1.0"
 
 
