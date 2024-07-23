@@ -4,16 +4,17 @@ import polars as pl
 import requests
 import json
 from typing import Dict, Any, Optional, List, Tuple
-from neo4j import GraphDatabase, Query
+from neo4j import GraphDatabase, Driver, Query, basic_auth
 import hashlib
 
 from magictables.utils import call_ai_model, flatten_nested_structure
 from dotenv import load_dotenv
+import urllib.parse
 
 load_dotenv()
 
 
-class MagicDataFrame(pl.DataFrame):
+class MagicTable(pl.DataFrame):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.openai_api_key = "your_openai_api_key_here"
@@ -22,9 +23,35 @@ class MagicDataFrame(pl.DataFrame):
         self.neo4j_password = os.getenv("NEO4J_PASSWORD", "password")
         self.jina_api_key = os.getenv("JINA_API_KEY")
         self.api_urls = []
+        self._driver = None
+
+    def _get_driver(self) -> Driver:
+        if self._driver is None:
+            parsed_uri = urllib.parse.urlparse(self.neo4j_uri)
+            scheme = parsed_uri.scheme
+            if scheme in ["bolt", "neo4j", "bolt+s"]:
+                self._driver = GraphDatabase.driver(
+                    self.neo4j_uri, auth=(self.neo4j_user, self.neo4j_password)
+                )
+            elif scheme in ["http", "https"]:
+                self._driver = GraphDatabase.driver(
+                    self.neo4j_uri,
+                    auth=basic_auth(self.neo4j_user, self.neo4j_password),
+                )
+            else:
+                raise ValueError(f"Unsupported URI scheme: {scheme}")
+        return self._driver
+
+    def _close_driver(self):
+        if self._driver is not None:
+            self._driver.close()
+            self._driver = None
+
+    def __del__(self):
+        self._close_driver()
 
     @classmethod
-    def from_polars(cls, df: pl.DataFrame, label: str) -> "MagicDataFrame":
+    def from_polars(cls, df: pl.DataFrame, label: str) -> "MagicTable":
         magic_df = cls(df)
         # Generate a dummy API URL and description for consistency
         api_url = f"local://{label}"
@@ -36,7 +63,7 @@ class MagicDataFrame(pl.DataFrame):
     @classmethod
     def from_api(
         cls, api_url: str, params: Optional[Dict[str, Any]] = None
-    ) -> "MagicDataFrame":
+    ) -> "MagicTable":
         response = requests.get(api_url, params=params)
         data = response.json()
 
@@ -97,11 +124,8 @@ class MagicDataFrame(pl.DataFrame):
     def _store_in_neo4j(
         self, label: str, api_url: str, description: str, embedding: List[float]
     ):
-        driver = GraphDatabase.driver(
-            self.neo4j_uri, auth=(self.neo4j_user, self.neo4j_password)
-        )
 
-        with driver.session() as session:
+        with self._get_driver().session() as session:
             session.run(
                 """
                 MERGE (n:APIEndpoint {url: $api_url})
@@ -132,8 +156,6 @@ class MagicDataFrame(pl.DataFrame):
                     api_url=api_url,
                 )
 
-        driver.close()
-
     @staticmethod
     def _generate_node_id(label: str, data: Dict[str, Any]) -> str:
         key_fields = ["id", "uuid", "name", "email"]
@@ -151,11 +173,7 @@ class MagicDataFrame(pl.DataFrame):
     ) -> List[Tuple[str, str, float]]:
         query_embedding = self._generate_embedding(query)
 
-        driver = GraphDatabase.driver(
-            self.neo4j_uri, auth=(self.neo4j_user, self.neo4j_password)
-        )
-
-        with driver.session() as session:
+        with self._get_driver().session() as session:
             result = session.run(
                 """
                 MATCH (a:APIEndpoint)
@@ -173,7 +191,6 @@ class MagicDataFrame(pl.DataFrame):
                 for record in result
             ]
 
-        driver.close()
         return relevant_urls
 
     def _generate_query_key(
@@ -246,22 +263,17 @@ class MagicDataFrame(pl.DataFrame):
 
         return cypher_query
 
-    def join_with_query(self, natural_query: str) -> "MagicDataFrame":
+    def join_with_query(self, natural_query: str) -> "MagicTable":
         cypher_query = self._generate_cypher_query(natural_query)
         result_df = self._execute_cypher(cypher_query)
         self._store_cypher_query_as_edge(natural_query, cypher_query)
-        return MagicDataFrame(self.join(result_df, how="left"))
+        return MagicTable(self.join(result_df, how="left"))
 
     def _execute_cypher(self, query: str, params: Dict[str, Any] = {}) -> pl.DataFrame:
-        driver = GraphDatabase.driver(
-            self.neo4j_uri, auth=(self.neo4j_user, self.neo4j_password)
-        )
-
-        with driver.session() as session:
+        with self._get_driver().session() as session:
             result = session.run(query, params)  # type: ignore
             records = [dict(record) for record in result]
 
-        driver.close()
         return pl.DataFrame(records)
 
     def _standardize_data_types(self, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -287,11 +299,7 @@ class MagicDataFrame(pl.DataFrame):
         relevant_urls = self._search_relevant_api_urls(natural_query)
         query_key = self._generate_query_key(natural_query, relevant_urls)
 
-        driver = GraphDatabase.driver(
-            self.neo4j_uri, auth=(self.neo4j_user, self.neo4j_password)
-        )
-
-        with driver.session() as session:
+        with self._get_driver().session() as session:
             # Create a QueryNode for the natural language query
             session.run(
                 """
@@ -319,8 +327,6 @@ class MagicDataFrame(pl.DataFrame):
                     cypher_query=cypher_query,
                 )
 
-        driver.close()
-
     @staticmethod
     def _extract_node_labels(cypher_query: str) -> List[str]:
         # This is a simple extraction method and might need to be more sophisticated
@@ -335,7 +341,7 @@ class MagicDataFrame(pl.DataFrame):
         return list(set(labels))
 
     @classmethod
-    def from_query(cls, natural_query: str) -> "MagicDataFrame":
+    def from_query(cls, natural_query: str) -> "MagicTable":
         instance = cls()
         cypher_query = instance._generate_cypher_query(natural_query)
         result_df = instance._execute_cypher(cypher_query)
@@ -343,11 +349,7 @@ class MagicDataFrame(pl.DataFrame):
         return cls(result_df)
 
     def _store_cypher_query(self, query_key: str, cypher_query: str):
-        driver = GraphDatabase.driver(
-            self.neo4j_uri, auth=(self.neo4j_user, self.neo4j_password)
-        )
-
-        with driver.session() as session:
+        with self._get_driver().session() as session:
             session.run(
                 """
                 MERGE (q:QueryNode {key: $query_key})
@@ -357,14 +359,8 @@ class MagicDataFrame(pl.DataFrame):
                 cypher_query=cypher_query,
             )
 
-        driver.close()
-
     def _get_stored_cypher_query(self, query_key: str) -> Optional[str]:
-        driver = GraphDatabase.driver(
-            self.neo4j_uri, auth=(self.neo4j_user, self.neo4j_password)
-        )
-
-        with driver.session() as session:
+        with self._get_driver().session() as session:
             result = session.run(
                 """
                 MATCH (q:QueryNode {key: $query_key})
@@ -373,7 +369,5 @@ class MagicDataFrame(pl.DataFrame):
                 query_key=query_key,
             )
             stored_query = result.single()
-
-        driver.close()
 
         return stored_query[0] if stored_query else None

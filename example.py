@@ -1,59 +1,61 @@
-from magictables import Source, Chain
+from magictables import MagicTable
+
 
 API_KEY = "1865f43a0549ca50d341dd9ab8b29f49"
 
-# Define data sources
-tmdb_api = Source.api("TMDB API")
-tmdb_api.add_route(
-    "popular_movies",
-    f"https://api.themoviedb.org/3/movie/popular?api_key={API_KEY}",
-    "Get popular movies",
-)
-tmdb_api.add_route(
-    "movie_details",
-    f"https://api.themoviedb.org/3/movie/{{movie_id}}?api_key={API_KEY}",
-    "Get movie details",
-)
-tmdb_api.add_route(
-    "company_details",
-    f"https://api.themoviedb.org/3/company/{{company_id}}?api_key={API_KEY}",
-    "Get company details",
-)
-
-countries_api = Source.api("Countries API")
-countries_api.add_route(
-    "country_details",
-    "https://restcountries.com/v3.1/alpha/{origin_country}",
-    "Get country details",
-)
-
-# Create a Chain
-movie_analysis = Chain()
-movie_analysis.add(tmdb_api, "Fetch popular movies", "popular_movies")
-movie_analysis.add(tmdb_api, "Fetch movie details", "movie_details")
-movie_analysis.add(tmdb_api, "Fetch company details", "company_details")
-movie_analysis.add(countries_api, "Fetch country details", "country_details")
-
-# Add analysis step
-# movie_analysis.analyze(
-#     "Generate insights about movies, production companies, and their countries"
-# )
-
 
 def main():
-    # Create an input DataFrame with initial data
+    # Create MagicTable instances for each API endpoint
+    popular_movies = MagicTable.from_api(
+        f"https://api.themoviedb.org/3/movie/popular?api_key={API_KEY}"
+    )
 
-    print("Executing Movie Analysis chain:")
-    result = movie_analysis.execute()
+    # Get the first movie ID from the popular movies list
+    first_movie_id = popular_movies["id"][0]
 
-    print("\nResult:")
+    # Fetch movie details for the first movie
+    movie_details = MagicTable.from_api(
+        f"https://api.themoviedb.org/3/movie/{first_movie_id}?api_key={API_KEY}"
+    )
 
-    print("\nSecond execution (cache hit expected):")
-    result2 = movie_analysis.execute()
+    # Get the first production company ID from the movie details
+    first_company_id = movie_details["production_companies"][0]["id"]
 
-    result2.write_json("movies.json")
+    # Fetch company details
+    company_details = MagicTable.from_api(
+        f"https://api.themoviedb.org/3/company/{first_company_id}?api_key={API_KEY}"
+    )
 
-    print("Result", result2)
+    # Get the origin country of the company
+    origin_country = company_details["origin_country"]
+
+    # Fetch country details
+    country_details = MagicTable.from_api(
+        f"https://restcountries.com/v3.1/alpha/{origin_country}"
+    )
+
+    print("Popular Movies:")
+    print(popular_movies)
+
+    print("\nMovie Details:")
+    print(movie_details)
+
+    print("\nCompany Details:")
+    print(company_details)
+
+    print("\nCountry Details:")
+    print(country_details)
+
+    # Example of using join_with_query
+    movie_analysis = popular_movies.join_with_query(
+        "Find movies with a vote average greater than 7.5"
+    )
+
+    print("\nMovie Analysis:")
+    print(movie_analysis)
+
+    # Save the results to a JSON file
+    movie_analysis.write_json("movies_analysis.json")
 
 
 if __name__ == "__main__":
