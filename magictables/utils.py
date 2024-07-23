@@ -2,11 +2,11 @@
 import json
 import os
 from typing import Any, Dict, List
-import requests
+import aiohttp
 from dotenv import load_dotenv
 
 import logging
-from litellm import completion
+from litellm import acompletion
 
 
 logging.basicConfig(level=logging.DEBUG)
@@ -46,7 +46,9 @@ def flatten_nested_structure(nested_structure):
     return flattened_rows
 
 
-def call_ai_model(input_data: List[Dict[str, Any]], prompt: str) -> Dict[str, Any]:
+async def call_ai_model(
+    input_data: List[Dict[str, Any]], prompt: str
+) -> Dict[str, Any]:
     api_key = None
     model = None
 
@@ -84,7 +86,7 @@ def call_ai_model(input_data: List[Dict[str, Any]], prompt: str) -> Dict[str, An
     ]
 
     try:
-        response = completion(model=model, messages=messages)
+        response = await acompletion(model=model, messages=messages)
         response_content = response.choices[0].message.content
         if "```json" in response_content:
             json_str = response_content.replace("```json", "```").split("```")[1]
@@ -98,7 +100,7 @@ def call_ai_model(input_data: List[Dict[str, Any]], prompt: str) -> Dict[str, An
         error_message = f"Failed to parse API response: {str(e)}"
         logging.error(error_message)
         raise Exception(error_message)
-    except requests.exceptions.RequestException as e:
+    except aiohttp.ClientError as e:
         error_message = f"API request failed: {str(e)}"
         logging.error(error_message)
         raise Exception(error_message)
