@@ -116,10 +116,20 @@ class MagicTable(pl.DataFrame):
         return df._parse_json_fields()
 
     async def _store_rows_in_neo4j(
-        self, label: str, api_url: str, api_description: str
+        self,
+        label: str,
+        api_url: str,
+        api_description: str,
+        transform_query: Optional[str] = None,
+        pandas_code: Optional[str] = None,
     ):
         sanitized_label = self._sanitize_label(label)
         logger.debug(f"Storing rows with label: {sanitized_label}, API URL: {api_url}")
+
+        # Generate query_key
+        query_key = self._generate_query_key(
+            transform_query or "", [[(api_url, api_description, 1.0)]]
+        )
 
         # Prepare all rows at once
         rows = []
@@ -147,13 +157,31 @@ class MagicTable(pl.DataFrame):
             SET d += row.row,
                 d.embedding = row.embedding
             MERGE (d)-[:SOURCED_FROM]->(a)
+            WITH d, a
+            
+            // Create TransformedData node if transform was applied
+            {f'''
+            MERGE (q:QueryNode {{key: $query_key}})
+            SET q.natural_query = $transform_query
+            MERGE (t:TransformedData {{id: apoc.create.uuid()}})
+            SET t += d
+            MERGE (q)-[r:TRANSFORMED_BY]->(t)
+            SET r.pandas_code = $pandas_code
+            ''' if transform_query and pandas_code else ''}
+            RETURN count(d) as nodes_created
             """  # type: ignore
         )
 
         driver = await self._get_driver()
         async with driver.session() as session:
             result = await session.run(
-                query, api_url=api_url, api_description=api_description, rows=rows
+                query,
+                api_url=api_url,
+                api_description=api_description,
+                rows=rows,
+                query_key=query_key,
+                transform_query=transform_query,
+                pandas_code=pandas_code,
             )
             summary = await result.consume()
             logger.debug(f"Stored {summary.counters.nodes_created} nodes in Neo4j")
@@ -493,18 +521,9 @@ Your response should be in the following JSON format:
                     labels.append(label.split(":")[-1])
         return list(set(labels))
 
-    async def transform(self, natural_query: str) -> "MagicTable":
-        result_df = await self._generate_and_execute_pandas_code(
-            self.to_pandas(), natural_query
-        )
-
-        result_df = pl.from_pandas(result_df)
-
-        return MagicTable(result_df)
-
     async def _generate_and_execute_pandas_code(
         self, pandas_df: pd.DataFrame, natural_query: str
-    ) -> pd.DataFrame:
+    ) -> Tuple[pd.DataFrame, Optional[str]]:
         query_key = self._generate_query_key(natural_query, [])
 
         # Check if we have stored pandas code
@@ -514,73 +533,34 @@ Your response should be in the following JSON format:
         else:
             prompt = f"""Given the following pandas DataFrame structure and the query, generate Python code to process or analyze the data using pandas.
 
-    What we are trying to achieve: {natural_query}
-    Find popular movies with a vote average greater than 7.5 and list their cast members who are older than 40
+        What we are trying to achieve: {natural_query}
+        Find popular movies with a vote average greater than 7.5 and list their cast members who are older than 40
 
-    Current DataFrame you must only work with:
-    DataFrame Structure:
-    Columns: {pandas_df.columns.tolist()}
-    Shape: {pandas_df.shape}
-    Data Types:
-    {pandas_df.dtypes}
+        Current DataFrame you must only work with:
+        DataFrame Structure:
+        Columns: {pandas_df.columns.tolist()}
+        Shape: {pandas_df.shape}
+        Data Types:
+        {pandas_df.dtypes}
 
-    Sample Data (first 5 rows):
-    {pandas_df.head(10).to_string()}
+        Sample Data (first 10 rows):
+        {pandas_df.head(10).to_string()}
 
-    Please provide Python code to process this DataFrame, adhering to the following guidelines:
-    1. Only use columns that exist in the DataFrame. Do not reference any columns not listed above.
-    2. Ensure all operations are efficient and use pandas vectorized operations where possible.
-    3. Handle potential data type issues, especially for date/time columns or numeric calculations.
-    4. The code should return a pandas DataFrame as the result.
-    5. Do not include any print statements or comments in the code.
-    6. The input DataFrame is named 'df'.
-    7. If the DataFrame is empty or missing required columns, create a sample DataFrame with the necessary columns.
-    8. When working with dates, always use pd.to_datetime() for conversion and handle potential errors.
-    9. For age calculations, use a method that works across different pandas versions, avoiding timedelta conversions to years.
-    10. You MUST only use pandas and no other libraries.
+        Please provide Python code to process this DataFrame, adhering to the following guidelines:
+        1. Only use columns that exist in the DataFrame. Do not reference any columns not listed above.
+        2. Ensure all operations are efficient and use pandas vectorized operations where possible.
+        3. Handle potential data type issues, especially for date/time columns or numeric calculations.
+        4. The code should return a pandas DataFrame as the result.
+        5. Do not include any print statements or comments in the code.
+        6. The input DataFrame is named 'df'.
+        7. If the DataFrame is empty or missing required columns, create a sample DataFrame with the necessary columns.
+        8. When working with dates, always use pd.to_datetime() for conversion and handle potential errors.
+        9. For age calculations, use a method that works across different pandas versions, avoiding timedelta conversions to years.
+        10. You MUST only use pandas and no other libraries.
 
-    These are merely EXAMPLES of code. They do NOT apply to the dataframe above:
-
-    1. Query: "Calculate the average price for each category"
-    {{"pandas_code": "
-    if df.empty or 'category' not in df.columns or 'price' not in df.columns:
-        df = pd.DataFrame({{'category': ['A', 'B', 'A', 'C'], 'price': [10, 20, 15, 25]}})
-    result = df.groupby('category')['price'].mean().reset_index()
-    "}}
-
-    2. Query: "Find the top 5 products by sales volume"
-    {{"pandas_code": "
-    if df.empty or 'product' not in df.columns or 'sales_volume' not in df.columns:
-        df = pd.DataFrame({{'product': ['P1', 'P2', 'P3', 'P4', 'P5', 'P6'], 'sales_volume': [100, 150, 80, 200, 120, 90]}})
-    result = df.sort_values('sales_volume', ascending=False).head(5)
-    "}}
-
-    3. Query: "Find popular movies with a vote average greater than 7.5 and list their cast members who are older than 40"
-    {{"pandas_code": "
-    if df.empty or 'movie_title' not in df.columns or 'vote_average' not in df.columns or 'cast_name' not in df.columns or 'birth_date' not in df.columns:
-        df = pd.DataFrame({{
-            'movie_title': ['Movie A', 'Movie B', 'Movie C', 'Movie D'],
-            'vote_average': [8.0, 7.2, 7.8, 7.9],
-            'cast_name': ['Actor 1', 'Actor 2', 'Actor 3', 'Actor 4'],
-            'birth_date': ['1970-01-01', '1985-01-01', '1960-01-01', '1975-01-01']
-        }})
-
-    df['vote_average'] = pd.to_numeric(df['vote_average'], errors='coerce')
-    df['birth_date'] = pd.to_datetime(df['birth_date'], errors='coerce')
-    current_date = pd.Timestamp.now()
-    df['age'] = current_date.year - df['birth_date'].dt.year - ((current_date.month * 100 + current_date.day) < (df['birth_date'].dt.month * 100 + df['birth_date'].dt.day))
-
-    popular_movies = df[df['vote_average'] > 7.5]
-    older_cast = df[df['age'] > 40]
-
-    result = popular_movies.merge(older_cast, on=['movie_title', 'cast_name'], suffixes=('_movie', '_cast'))
-    result = result[['movie_title', 'vote_average', 'cast_name', 'age']].drop_duplicates()
-    result = result.sort_values(['vote_average', 'age'], ascending=[False, False])
-    "}}
-
-    Your response should be in the following JSON format:
-    {{"pandas_code": "Your Python code here"}}
-    """
+        Your response should be in the following JSON format:
+        {{"pandas_code": "Your Python code here"}}
+        """
             response = await call_ai_model(
                 [],
                 prompt,
@@ -603,12 +583,12 @@ Your response should be in the following JSON format:
             )
             await self._store_pandas_query(natural_query, pandas_code)
 
-            return result
+            return result, pandas_code
         except Exception as e:
             logger.error(f"Error executing pandas code: {str(e)}")
             logger.error(f"Generated code:\n{pandas_code}")
             logger.debug("Falling back to original DataFrame")
-            return pandas_df
+            return pandas_df, None
 
     async def _get_database_schema(self) -> Dict[str, Any]:
         driver = await self._get_driver()
@@ -679,7 +659,13 @@ Your response should be in the following JSON format:
             )
             stored_queries = await result.single()
 
-        return (stored_queries[0], stored_queries[1]) if stored_queries else None
+        if (
+            stored_queries
+            and stored_queries[0] is not None
+            and stored_queries[1] is not None
+        ):
+            return (str(stored_queries[0]), str(stored_queries[1]))
+        return None
 
     async def chain(
         self,
@@ -973,7 +959,7 @@ Your response should be in the following JSON format:
         await self._close_driver()
         if exc_type:
             # Handle the exception if needed
-            print(f"An error occurred: {exc_type.__name__}: {exc_val}")
+            # print(f"An error occurred: {exc_type.__name__}: {exc_val}")
         return False  # Propagate exceptions
 
     async def _store_pandas_query(self, natural_query: str, pandas_code: str):
@@ -1007,3 +993,82 @@ Your response should be in the following JSON format:
             stored_code = await result.single()
 
         return stored_code[0] if stored_code else None
+
+    async def _get_cached_transform(self, query_key: str) -> Optional[pl.DataFrame]:
+        logger.debug(
+            f"Attempting to retrieve cached transform for query key: {query_key}"
+        )
+        driver = await self._get_driver()
+        async with driver.session() as session:
+            result = await session.run(
+                """
+                MATCH (q:QueryNode {key: $query_key})
+                RETURN q.cypher_query, q.pandas_query
+                """,
+                query_key=query_key,
+            )
+            stored_queries = await result.single()
+        # print("query", query_key)
+
+        if stored_queries and stored_queries.data:  # Check if pandas_query exists
+            pandas_query = stored_queries.data["q.pandas_code"]
+
+            try:
+                local_vars = {"df": self.to_pandas(), "pd": pd}
+                exec(pandas_query, globals(), local_vars)
+                result = local_vars.get("result", self.to_pandas())
+                if not isinstance(result, pd.DataFrame):
+                    raise ValueError(
+                        "The stored code did not return a pandas DataFrame"
+                    )
+                return pl.from_pandas(result)
+            except Exception as e:
+                logger.error(f"Error executing stored pandas query: {str(e)}")
+
+        return None
+
+    async def _cache_transform(
+        self, query_key: str, transformed_df: pl.DataFrame, pandas_code: str
+    ):
+        logger.debug(f"Caching transformed data for query key: {query_key}")
+        driver = await self._get_driver()
+        async with driver.session() as session:
+            # Prepare the query
+            query = """
+            MERGE (q:QueryNode {key: $query_key})
+            SET q.pandas_query = $pandas_code
+            """
+
+            # Execute the query
+            try:
+                await session.run(
+                    query,
+                    query_key=query_key,
+                    pandas_code=pandas_code,
+                )
+                logger.info(f"Successfully cached transform for query key: {query_key}")
+            except Exception as e:
+                logger.error(
+                    f"Error caching transform for query key {query_key}: {str(e)}"
+                )
+
+    async def transform(self, natural_query: str) -> "MagicTable":
+        # Generate a unique key for this transformation
+        query_key = self._generate_query_key(natural_query, [])
+
+        # Check for cached result
+        cached_result = await self._get_cached_transform(query_key)
+        if cached_result is not None:
+            logger.info("Using cached transform result")
+            return MagicTable(cached_result)
+
+        logger.info("No cached transform result found, generating new result")
+        result_df, pandas_code = await self._generate_and_execute_pandas_code(
+            self.to_pandas(), natural_query
+        )
+        result_df = pl.from_pandas(result_df)
+        if pandas_code is not None:
+            # Cache the result
+            await self._cache_transform(query_key, result_df, pandas_code)
+
+        return MagicTable(result_df)
