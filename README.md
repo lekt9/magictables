@@ -1,22 +1,22 @@
+
 # MagicTables
 
-MagicTables is a powerful Python library designed for data scientists, API scrapers, and developers working on data pipelines and ETL processes. It creates a shadow queryable database that automatically captures and stores your data, simplifying retrieval, caching, and analysis. With easy-to-use decorators, MagicTables streamlines API integration, web scraping, and data enrichment tasks.
+MagicTables is an advanced Python library designed to streamline data preparation and exploration for data scientists. It provides a declarative approach to data handling, allowing you to focus on analysis and model development without getting bogged down in data engineering tasks.
 
-## Features
+## Core Features
 
-- Seamlessly create a shadow database that automatically captures and versions function results
-- Effortlessly cache API responses and function outputs in a local SQLite database
-- Augment your data pipeline with AI-generated insights
-- Perform complex queries and data mining on your captured data without modifying your original code
-- Join and analyze data across multiple functions for advanced data exploration
-- Streamline your data engineering workflow with easy-to-use decorators
-- Support for various AI models through OpenRouter API for data enrichment
-- Simplify ETL processes with intelligent post-transformations
-- Construct SQL queries using a fluent interface, without writing raw SQL
-- Enhance data lineage and governance with built-in data cataloging
-- Optimize your data ops and MLOps workflows with efficient data storage and retrieval
-- Chain operations for complex data transformations
-- Convert results to various formats, including JSON and pandas DataFrames
+- **API to DataFrame Conversion**: Instantly convert API responses into usable DataFrames.
+- **Declarative Data Preparation**: Define your data requirements, not the implementation details.
+- **Dynamic Data Chaining**: Easily combine data from multiple sources with automatic type handling.
+- **Natural Language Queries**: Use plain English to transform and query your data.
+- **Hybrid Storage System**: Flexible storage options with a hybrid approach to caching and querying.
+- **Intelligent Data Retrieval**: Dynamically query and retrieve relevant data based on context.
+- **High-Performance Engine**: Powered by Polars for fast data processing.
+- **Automatic Data Type Handling**: Intelligent conversion and standardization of data types, including dates and complex structures.
+- **Smart Caching**: Efficient caching of data, queries, and transformations to speed up repeated analyses.
+- **Automatic Key Column Identification**: Intelligently identifies suitable key columns for joining datasets.
+- **Schema Detection**: Automatically detects and provides database schema, saving time on manual inspection.
+- **AI-Assisted Operations**: Leverages AI for generating API descriptions and pandas code for complex transformations.
 
 ## Installation
 
@@ -24,196 +24,257 @@ MagicTables is a powerful Python library designed for data scientists, API scrap
 pip install magictables
 ```
 
-## Quick Start
+## Usage Examples
+
+### Fetching Data from an API
 
 ```python
-import logging
+from magictables import MagicTable
+import asyncio
 import os
-from typing import List, Dict, Any
 from dotenv import load_dotenv
-import requests
-import pandas as pd
-from magictables import mtable, mai
-from magictables.query import query
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-)
-
-# Load environment variables
 load_dotenv()
+API_KEY = os.getenv("TMDB_API_KEY")
 
-# Ensure you have set the OPENAI_API_KEY in your .env file
-# OPENAI_API_KEY=your_api_key_here
+async def fetch_popular_movies():
+    popular_movies = await MagicTable.from_api(
+        f"https://api.themoviedb.org/3/movie/popular?api_key={API_KEY}"
+    )
+    print(popular_movies)
 
-@mtable()
-def fetch_github_repos(username: str) -> List[Dict[str, Any]]:
-    """Fetch GitHub repositories for a given user."""
-    url = f"https://api.github.com/users/{username}/repos"
-    response = requests.get(url)
-    repos = response.json()
-    return [
-        {
-            "id": repo["id"],
-            "name": repo["name"],
-            "description": repo["description"],
-            "stars": repo["stargazers_count"],
-            "forks": repo["forks_count"],
-            "language": repo["language"],
-        }
-        for repo in repos
-    ]
+asyncio.run(fetch_popular_movies())
+```
 
-@mtable()
-def process_repo_data(repos: pl.DataFrame) -> pl.DataFrame:
-    """Process and filter repository data."""
-    return (
-        repos[repos["stars"] > 0]
-        .assign(popularity_score=lambda df: df["stars"] + df["forks"])
-        .rename(columns={"name": "repo_name"})[
-            ["id", "repo_name", "description", "language", "popularity_score"]
-        ]
+Output:
+```
+Fetching popular movies...
+shape: (20, 17)
+┌─────────────┬─────────────┬────────────┬────────────┬───┬──────┬────────────┬───────┬────────────┐
+│ overview    ┆ original_la ┆ original_t ┆ total_page ┆ … ┆ page ┆ id         ┆ adult ┆ vote_count │
+│ ---         ┆ nguage      ┆ itle       ┆ s          ┆   ┆ ---  ┆ ---        ┆ ---   ┆ ---        │
+│ str         ┆ ---         ┆ ---        ┆ ---        ┆   ┆ f64  ┆ f64        ┆ f64   ┆ f64        │
+│             ┆ str         ┆ str        ┆ f64        ┆   ┆      ┆            ┆       ┆            │
+╞═════════════╪═════════════╪════════════╪════════════╪═══╪══════╪════════════╪═══════╪════════════╡
+│ As storm    ┆ 2024-01-23T ┆ Twisters   ┆ 45217.0    ┆ … ┆ 1.0  ┆ 718821.0   ┆ 0.0   ┆ 169.0      │
+│ season inte ┆ 00:00:00    ┆            ┆            ┆   ┆      ┆            ┆       ┆            │
+│ nsifies, t… ┆             ┆            ┆            ┆   ┆      ┆            ┆       ┆            │
+│ A young     ┆ es          ┆ Goyo       ┆ 45217.0    ┆ … ┆ 1.0  ┆ 1.19161e6  ┆ 0.0   ┆ 32.0       │
+│ autistic    ┆             ┆            ┆            ┆   ┆      ┆            ┆       ┆            │
+│ museum      ┆             ┆            ┆            ┆   ┆      ┆            ┆       ┆            │
+│ guide …     ┆             ┆            ┆            ┆   ┆      ┆            ┆       ┆            │
+│ ...         ┆ ...         ┆ ...        ┆ ...        ┆ … ┆ ...  ┆ ...        ┆ ...   ┆ ...        │
+└─────────────┴─────────────┴────────────┴────────────┴───┴──────┴────────────┴───────┴────────────┘
+```
+
+### Chaining API Calls
+
+```python
+async def fetch_movie_details():
+    popular_movies = await MagicTable.from_api(
+        f"https://api.themoviedb.org/3/movie/popular?api_key={API_KEY}"
+    )
+    
+    movie_details = await popular_movies.chain(
+        api_url=f"https://api.themoviedb.org/3/movie/{{id}}?api_key={API_KEY}",
+    )
+    print(movie_details)
+
+asyncio.run(fetch_movie_details())
+```
+
+Output:
+```
+Chaining API calls for movie details...
+shape: (20, 30)
+┌────────────┬────────────┬───────────┬───────────┬───┬─────────┬───────────┬──────────┬───────────┐
+│ overview   ┆ original_l ┆ original_ ┆ total_pag ┆ … ┆ runtime ┆ spoken_la ┆ status   ┆ tagline   │
+│ ---        ┆ anguage    ┆ title     ┆ es        ┆   ┆ ---     ┆ nguages   ┆ ---      ┆ ---       │
+│ str        ┆ ---        ┆ ---       ┆ ---       ┆   ┆ i64     ┆ ---       ┆ str      ┆ str       │
+│            ┆ str        ┆ str       ┆ f64       ┆   ┆         ┆ list[stru ┆          ┆           │
+│            ┆            ┆           ┆           ┆   ┆         ┆ ct[3]]    ┆          ┆           │
+╞════════════╪════════════╪═══════════╪═══════════╪═══╪═════════╪═══════════╪══════════╪═══════════╡
+│ As storm   ┆ 2024-01-23 ┆ Twisters  ┆ 45217.0   ┆ … ┆ 122     ┆ [{"Englis ┆ Released ┆ Chase.    │
+│ season int ┆ T00:00:00  ┆           ┆           ┆   ┆         ┆ h","en"," ┆          ┆ Ride.     │
+│ ensifies,  ┆            ┆           ┆           ┆   ┆         ┆ English"} ┆          ┆ Survive.  │
+│ t…         ┆            ┆           ┆           ┆   ┆         ┆ ]         ┆          ┆           |
+│ ...        ┆ ...        ┆ ...       ┆ ...       ┆ … ┆ ...     ┆ ...       ┆ ...      ┆ ...       │
+└────────────┴────────────┴───────────┴───────────┴───┴─────────┴───────────┴──────────┴───────────┘
+```
+
+### Natural Language Transformation
+
+```python
+async def analyze_high_rated_movies():
+    popular_movies = await MagicTable.from_api(
+        f"https://api.themoviedb.org/3/movie/popular?api_key={API_KEY}"
+    )
+    
+    movie_details = await popular_movies.chain(
+        api_url=f"https://api.themoviedb.org/3/movie/{{id}}?api_key={API_KEY}",
+    )
+    
+    result = await movie_details.transform(
+        "Find popular movies with a vote average greater than 7.5"
+    )
+    print(result)
+
+asyncio.run(analyze_high_rated_movies())
+```
+
+Output:
+```
+Querying across chained data...
+query 65898df8aeebe4b88058a9e8cbd22822
+shape: (3, 3)
+┌─────────────────────────┬──────────────┬─────────────────────┐
+│ title                   ┆ vote_average ┆ release_date        │
+│ ---                     ┆ ---          ┆ ---                 │
+│ str                     ┆ f64          ┆ datetime[ns]        │
+╞═════════════════════════╪══════════════╪═════════════════════╡
+│ Deadpool & Wolverine    ┆ 7.8          ┆ 2024-07-24 00:00:00 │
+│ Furiosa: A Mad Max Saga ┆ 7.648        ┆ 2024-05-22 00:00:00 │
+│ Inside Out 2            ┆ 7.643        ┆ 2024-06-11 00:00:00 │
+└─────────────────────────┴──────────────┴─────────────────────┘
+```
+
+### Comprehensive Example
+
+Here's a more comprehensive example that demonstrates multiple features of MagicTables:
+
+```python
+from magictables import MagicTable
+import os
+from dotenv import load_dotenv
+import asyncio
+
+load_dotenv()
+API_KEY = os.getenv("TMDB_API_KEY")
+
+async def main():
+    # Create a MagicTable instance
+    mt = MagicTable()
+
+    # Fetch popular movies
+    popular_movies = await MagicTable.from_api(
+        f"https://api.themoviedb.org/3/movie/popular?api_key={API_KEY}"
     )
 
-@mai(batch_size=5, mode="augment", query="add a haiku for the repo")
-def generate_repo_summary(repos: pl.DataFrame) -> pl.DataFrame:
-    """Generate AI summaries for repositories."""
-    return repos
+    # Chain API calls for movie details
+    movie_details = await popular_movies.chain(
+        api_url=f"https://api.themoviedb.org/3/movie/{{id}}?api_key={API_KEY}",
+    )
 
-# Main execution
+    # Use natural language transformation
+    result = await movie_details.transform(
+        "Find popular movies with a vote average greater than 7.5"
+    )
+    print(result)
+
 if __name__ == "__main__":
-    # Fetch and process data
-    username = "lekt9"
-    raw_repos = fetch_github_repos(username)
-    processed_repos = process_repo_data(raw_repos)
-    repos_with_summary = generate_repo_summary(processed_repos)
-
-    logging.info("Repositories with AI-generated summaries:")
-    logging.info(repos_with_summary)
-
-    # Demonstrate caching
-    logging.info("\nDemonstrating caching (should be faster):")
-    cached_repos = fetch_github_repos(username)
-    logging.info(f"Cached repos fetched for {username}")
-
-    # Query examples
-    # Fetch all results
-    all_results = query("ai_generate_repo_summary").all()
-    logging.info("All results: %s", all_results)
-
-    # Filter results
-    python_projects = query("ai_generate_repo_summary").filter(language="Python").all()
-    logging.info("Python projects: %s", python_projects)
-
-    # Order results
-    top_projects = (
-        query("ai_generate_repo_summary").order_by("-popularity_score").limit(5).all()
-    )
-    logging.info("Top 5 projects by popularity: %s", top_projects)
-
-    # Count results
-    project_count = (
-        query("ai_generate_repo_summary").filter(popularity_score={">=": 2}).count()
-    )
-    logging.info(
-        "Number of projects with popularity score greater than or equal to 2: %d",
-        project_count,
-    )
-
-    # Get first result
-    first_project = query("ai_generate_repo_summary").first()
-    logging.info("First project in the database: %s", first_project)
+    asyncio.run(main())
 ```
 
-## How It Works
+This example demonstrates:
+1. API data fetching
+2. API chaining for detailed information
+3. Natural language querying
+4. Automatic data type handling and caching (behind the scenes)
 
-### @mtable()
+The output of this comprehensive example would be similar to the output of the Natural Language Transformation example shown above.
 
-The `@mtable()` decorator automatically caches the results of API calls or any function that returns JSON-serializable data. It stores the data in a local SQLite database, allowing for quick retrieval on subsequent calls with the same arguments and enabling complex queries on the stored data.
+## Advanced Features
 
-### @mai()
+### Automatic Data Type Handling
 
-The `@mai()` decorator uses AI to augment function calls with additional data. It can work in two modes:
+MagicTables automatically handles various data types, including dates, numbers, and complex data structures like lists and dictionaries. This feature saves time and reduces errors in data preprocessing.
 
-1. "generate" mode: Creates new data based on the input.
-2. "augment" mode: Extends existing data with AI-generated fields.
+### Smart Caching
 
-This allows you to enrich your data with AI-generated insights seamlessly.
+The library implements an intelligent caching system that stores data, queries, and transformations. This significantly speeds up repeated analyses and reduces the load on external data sources.
 
-### query()
+### Automatic Key Column Identification
 
-The `query()` function provides a fluent interface for constructing SQL queries without writing raw SQL. It allows you to chain methods like `filter()`, `order_by()`, and `limit()` to build and execute queries on the shadow database.
+When joining datasets, MagicTables attempts to automatically identify the most suitable key columns, simplifying the process of merging related data.
 
-## Advanced Usage
+### Schema Detection
 
-### Customizing AI Model and Batch Size
+MagicTables can automatically detect and provide the schema of your data, giving you a quick overview of your dataset's structure without manual inspection.
 
-```python
-@mai(
-    api_key=os.environ["OPENAI_API_KEY"],
-    model="openai/gpt-4o-mini",
-    batch_size=20,
-    mode="generate",
-    query="Generate a detailed description of the repository"
-)
-def generate_repo_description(repos: pl.DataFrame) -> pl.DataFrame:
-    return repos
+### AI-Assisted Operations
+
+The library leverages AI to generate API descriptions and even pandas code for complex transformations based on natural language queries, further simplifying the data science workflow.
+
+## Why MagicTables?
+
+1. **Flexible Data Handling**: Utilize a hybrid approach for data storage and retrieval, combining the benefits of in-memory processing and optional persistent storage.
+2. **Faster Iteration**: Reduce time spent on data preparation, allowing more focus on model development and analysis.
+3. **No Data Engineering Bottleneck**: Perform complex data operations without relying on data engineering support.
+4. **Intuitive Interface**: Use natural language for data transformations and queries.
+5. **Performance**: Leverages efficient caching and data processing techniques without requiring a dedicated database.
+6. **Flexibility**: Works with various data sources (APIs, databases, files) seamlessly.
+7. **Reduced Boilerplate**: Eliminate repetitive code for data fetching, cleaning, and transformation.
+8. **Exploratory Freedom**: Quickly test ideas and hypotheses without complex setup.
+You're absolutely right. Adding information about Neo4j configuration and required environment variables is crucial for users to properly set up and use MagicTables. Let's add a new section to the README.md file to address this. Here's a suggested addition:
+
+## Configuration
+
+### Environment Variables
+
+MagicTables requires several environment variables to be set for proper functionality. You can set these in a `.env` file in your project root or in your system environment.
+
+Required environment variables:
+
+- `NEO4J_URI`: The URI of your Neo4j database (e.g., `bolt://localhost:7687`)
+- `NEO4J_USER`: Your Neo4j username
+- `NEO4J_PASSWORD`: Your Neo4j password
+- `OPENAI_API_KEY`: Your OpenAI API key for natural language processing features
+- `JINA_API_KEY`: Your Jina AI API key for embedding generation
+
+Optional environment variables:
+
+- `OPENAI_BASE_URL`: Custom base URL for OpenAI API (default: https://openrouter.ai/api/v1/chat/completions)
+- `OPENAI_MODEL`: Specific OpenAI model to use (default: gpt-4o-mini)
+- `LLM_PROVIDER`: The LLM provider to use (options: "openai", "openrouter", "ollama"; default: "openai")
+- `OPENROUTER_API_KEY`: Your OpenRouter API key (if using OpenRouter as LLM provider)
+- `OLLAMA_API_KEY`: Your Ollama API key (if using Ollama as LLM provider)
+
+### Neo4j Configuration
+
+If you want to store data persistently, you need to set up a Neo4j database. Here are the steps to configure Neo4j:
+
+1. Install Neo4j: Download and install Neo4j from the [official website](https://neo4j.com/download/).
+
+2. Start Neo4j: Start your Neo4j server either through the Neo4j Desktop application or via command line.
+
+3. Create a new database or use an existing one.
+
+4. Set the environment variables:
+   - Set `NEO4J_URI` to the URI of your Neo4j instance (e.g., `bolt://localhost:7687`)
+   - Set `NEO4J_USER` to your Neo4j username (default is usually "neo4j")
+   - Set `NEO4J_PASSWORD` to your Neo4j password
+
+5. Ensure your Neo4j database is running before using MagicTables.
+
+Example `.env` file:
+
+```
+NEO4J_URI=bolt://localhost:7687
+NEO4J_USER=neo4j
+NEO4J_PASSWORD=your_password
+OPENAI_API_KEY=your_openai_api_key
+JINA_API_KEY=your_jina_api_key
+LLM_PROVIDER=openai
 ```
 
-### Working with Nested Data
+Make sure to add `.env` to your `.gitignore` file to avoid exposing sensitive information.
 
-MagicTables automatically handles nested data structures, storing them in separate tables and reconstructing them when queried.
-
-### Complex Queries
-
-```python
-results = (
-    query("ai_generate_repo_summary")
-    .filter(language="Python", popularity_score={">=": 10})
-    .order_by("-popularity_score")
-    .limit(5)
-    .all()
-)
-```
-
-## Development Setup
-
-This project uses `pre-commit` to run tests before each commit. To set it up:
-
-1. Install pre-commit:
-   ```
-   pip install pre-commit
-   ```
-
-2. Set up the git hook scripts:
-   ```
-   pre-commit install
-   ```
-
-Now, tests will run automatically before each commit.
-
-## Best Practices
-
-1. Use meaningful function names as they are used to generate table names in the shadow database.
-2. Implement proper error handling in your decorated functions to ensure data integrity.
-3. Use batch processing with the `batch_size` parameter in `@mai()` for large datasets.
-4. Regularly maintain and clean up your shadow database to remove outdated data.
-5. Leverage the query builder for complex data analysis tasks.
-6. Use environment variables for sensitive information like API keys.
-7. Implement logging to track the execution flow and debug issues more easily.
+Note: If you don't want to use Neo4j for persistent storage, MagicTables will fall back to in-memory storage. However, some features like caching and cross-session data persistence will not be available.
 
 ## Contributing
 
-Contributions to MagicTables are welcome! Please read our contribution guidelines for more information on our development process and coding standards.
+Contributions are welcome. Please see [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Acknowledgments
-
-- Thanks to all the contributors who have helped shape MagicTables.
-- Special thanks to the open-source community for providing the tools and libraries that make MagicTables possible.
-
-Happy data wrangling with MagicTables!
+MagicTables is released under the GNU General Public License v3.0 (GPL-3.0). See the [LICENSE](LICENSE) file for details.

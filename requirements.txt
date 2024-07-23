@@ -1,7 +1,7 @@
-pandas
 requests
 python-dotenv
-dataset
-pandera[polars]
-pytest
-pre-commit
+polars
+polars-lts-cpu
+dateparser
+litellm
+pycozo
