@@ -277,7 +277,7 @@ The library leverages AI to generate API descriptions and even pandas code for c
 6. **Flexibility**: Works with various data sources (APIs, databases, files) seamlessly.
 7. **Reduced Boilerplate**: Eliminate repetitive code for data fetching, cleaning, and transformation.
 8. **Exploratory Freedom**: Quickly test ideas and hypotheses without complex setup.
-You're absolutely right. Adding information about Neo4j configuration and required environment variables is crucial for users to properly set up and use MagicTables. Let's add a new section to the README.md file to address this. Here's a suggested addition:
+
 
 ## Configuration
 
