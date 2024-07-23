@@ -303,7 +303,7 @@ Optional environment variables:
 
 ### Neo4j Configuration
 
-If you want to store data persistently, you need to set up a Neo4j database. Here are the steps to configure Neo4j:
+If you want to store data and leverage full data querying capabilities, you need to set up a Neo4j database. Here are the steps to configure Neo4j:
 
 1. Install Neo4j: Download and install Neo4j from the [official website](https://neo4j.com/download/).
 
@@ -333,7 +333,7 @@ Make sure to add `.env` to your `.gitignore` file to avoid exposing sensitive in
 
 ## Fallback Behavior
 
-When Neo4j is not configured or unavailable, MagicTables uses a hybrid driver that falls back to in-memory storage with JSON-based caching. This allows basic functionality to continue working, but with some limitations:
+When Neo4j is not configured or unavailable, MagicTables uses a hybrid driver that falls back to local file storage with JSON-based caching. This allows basic functionality to continue working, but with some limitations:
 
 1. Data persistence is limited to what can be efficiently stored in JSON format.
 2. Complex graph operations that rely on Neo4j's capabilities are not available.
