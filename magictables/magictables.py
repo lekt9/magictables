@@ -71,13 +71,22 @@ class MagicTable(pl.DataFrame):
 
         df = cls(data)
 
-        label = api_url.split("/")[-1].capitalize()
+        parsed_url = urllib.parse.urlparse(api_url)
+        path_parts = parsed_url.path.split("/")
+        label = (
+            path_parts[-1].capitalize()
+            if path_parts[-1]
+            else path_parts[-2].capitalize()
+        )
 
         description = df._generate_api_description(api_url, data)
         embedding = df._generate_embedding(description)
-
         df._store_in_neo4j(label, api_url, description, embedding)
         df.api_urls.append(api_url)
+
+        # Parse JSON fields after retrieving from Neo4j
+        df = df._parse_json_fields()
+
         return df
 
     def _generate_api_description(
@@ -121,9 +130,18 @@ class MagicTable(pl.DataFrame):
         )
         return response.json()["data"][0]["embedding"]
 
+    @staticmethod
+    def _sanitize_label(label: str) -> str:
+        # Ensure the label starts with a letter
+        if not label[0].isalpha():
+            label = "N" + label
+        # Replace any non-alphanumeric characters with underscores
+        return "".join(c if c.isalnum() else "_" for c in label)
+
     def _store_in_neo4j(
         self, label: str, api_url: str, description: str, embedding: List[float]
     ):
+        sanitized_label = self._sanitize_label(label)
 
         with self._get_driver().session() as session:
             session.run(
@@ -139,10 +157,10 @@ class MagicTable(pl.DataFrame):
 
             for row in self.to_dicts():
                 standardized_row = self._standardize_data_types(row)
-                node_id = self._generate_node_id(label, standardized_row)
+                node_id = self._generate_node_id(sanitized_label, standardized_row)
                 query = Query(
                     f"""
-                    MERGE (d:{label} {{id: $node_id}})
+                    MERGE (d:{sanitized_label} {{id: $node_id}})
                     SET d += $row
                     WITH d
                     MATCH (a:APIEndpoint {{url: $api_url}})
@@ -274,7 +292,22 @@ class MagicTable(pl.DataFrame):
             result = session.run(query, params)  # type: ignore
             records = [dict(record) for record in result]
 
-        return pl.DataFrame(records)
+        df = pl.DataFrame(records)
+        return MagicTable(df)._parse_json_fields()
+
+    def _parse_json_fields(self) -> "MagicTable":
+        for column in self.columns:
+            if self[column].dtype == pl.Utf8:
+                try:
+                    parsed = pl.Series(
+                        name=column,
+                        values=[json.loads(x) if x else None for x in self[column]],
+                    )
+                    if isinstance(parsed[0], (list, dict)):
+                        self = self.with_columns([parsed])
+                except:
+                    pass
+        return MagicTable(self)
 
     def _standardize_data_types(self, data: Dict[str, Any]) -> Dict[str, Any]:
         standardized_data = {}
@@ -291,8 +324,14 @@ class MagicTable(pl.DataFrame):
                     standardized_data[key] = value.strip()
             elif isinstance(value, (int, float)):
                 standardized_data[key] = float(value)
+            elif isinstance(value, list):
+                # Convert list to a string representation
+                standardized_data[key] = json.dumps(value)
+            elif isinstance(value, dict):
+                # Convert dict to a string representation
+                standardized_data[key] = json.dumps(value)
             else:
-                standardized_data[key] = value
+                standardized_data[key] = str(value)
         return standardized_data
 
     def _store_cypher_query_as_edge(self, natural_query: str, cypher_query: str):
