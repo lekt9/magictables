@@ -174,9 +174,19 @@ class HybridSession:
         await self.close()
 
     async def _get_neo4j_session(self):
+        if self._use_cache_only:
+            return None
         if self._neo4j_session is None:
-            neo4j_driver = await self.driver._get_neo4j_driver()
-            self._neo4j_session = await neo4j_driver.session(**self.kwargs).__aenter__()
+            try:
+                neo4j_driver = await self.driver._get_neo4j_driver()
+                self._neo4j_session = await neo4j_driver.session(
+                    **self.kwargs
+                ).__aenter__()
+            except Exception as e:
+                logging.warning(
+                    f"Failed to connect to Neo4j: {str(e)}. Using cache only."
+                )
+                self._use_cache_only = True
         return self._neo4j_session
 
     async def close(self):
@@ -186,7 +196,34 @@ class HybridSession:
 
     async def run(self, query: str, parameters: Dict[str, Any] = None, **kwargs):
         neo4j_session = await self._get_neo4j_session()
-        return await neo4j_session.run(query, parameters, **kwargs)
+        if neo4j_session:
+            return await neo4j_session.run(query, parameters, **kwargs)
+        else:
+            # Use cache-only logic here
+            return await self._run_from_cache(query, parameters, **kwargs)
+
+    async def _run_from_cache(
+        self, query: str, parameters: Dict[str, Any] = None, **kwargs
+    ):
+        # Implement cache-only query execution logic here
+        # This method should parse the query, fetch data from the cache, and return a HybridResult
+        # You'll need to implement the logic to interpret the query and return appropriate results from the cache
+        # For example:
+        if "MATCH" in query:
+            try:
+                node_type = query.split("(")[1].split(":")[1].split(")")[0]
+                cached_data = self.driver._data.get(node_type, [])
+                return HybridResult(cached_data)
+            except IndexError:
+                logging.warning(
+                    "Failed to parse node type from query. Returning empty result."
+                )
+                return HybridResult([])
+        else:
+            logging.warning(
+                "Non-MATCH query cannot be served from cache. Returning empty result."
+            )
+            return HybridResult([])
 
 
 async def run(self, query: str, parameters: Dict[str, Any] = None, **kwargs):
