@@ -182,6 +182,32 @@ This example demonstrates:
 4. Automatic data type handling and caching (behind the scenes)
 
 The output of this comprehensive example would be similar to the output of the Natural Language Transformation example shown above.
+
+Output:
+```
+                 title  vote_average release_date
+0  Deadpool & Wolverine          7.8   2024-07-24
+1    Furiosa: A Mad Max          7.6   2024-05-22
+2         Inside Out 2          7.6   2024-06-11
+
+       vote_average
+count      3.000000
+mean       7.666667
+std        0.115470
+min        7.600000
+25%        7.600000
+50%        7.600000
+75%        7.700000
+max        7.800000
+```
+
+In this example, we:
+1. Fetch movie data using MagicTables
+2. Perform a transformation to find high-rated movies
+3. Convert the result to a pandas DataFrame using the `to_pandas()` method
+4. Use pandas operations like `head()` and `describe()` on the converted DataFrame
+
+This allows you to seamlessly integrate MagicTables with existing pandas-based workflows or libraries that expect pandas DataFrames as input.
 ### Converting to Pandas DataFrame
 
 MagicTables uses Polars DataFrames internally for high-performance data processing. However, you can easily convert the results to pandas DataFrames when needed. Here's how you can do it:
@@ -216,32 +242,6 @@ async def convert_to_pandas():
 
 asyncio.run(convert_to_pandas())
 ```
-
-Output:
-```
-                 title  vote_average release_date
-0  Deadpool & Wolverine          7.8   2024-07-24
-1    Furiosa: A Mad Max          7.6   2024-05-22
-2         Inside Out 2          7.6   2024-06-11
-
-       vote_average
-count      3.000000
-mean       7.666667
-std        0.115470
-min        7.600000
-25%        7.600000
-50%        7.600000
-75%        7.700000
-max        7.800000
-```
-
-In this example, we:
-1. Fetch movie data using MagicTables
-2. Perform a transformation to find high-rated movies
-3. Convert the result to a pandas DataFrame using the `to_pandas()` method
-4. Use pandas operations like `head()` and `describe()` on the converted DataFrame
-
-This allows you to seamlessly integrate MagicTables with existing pandas-based workflows or libraries that expect pandas DataFrames as input.
 
 
 ## Advanced Features
