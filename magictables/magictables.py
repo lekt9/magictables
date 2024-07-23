@@ -19,6 +19,7 @@ from magictables.utils import call_ai_model, flatten_nested_structure
 from dotenv import load_dotenv
 import urllib.parse
 import pandas as pd
+import litellm
 
 load_dotenv()
 
@@ -248,6 +249,15 @@ Your response should be in the following JSON format:
         return response.get("description", "Error generating API description")
 
     async def _generate_embedding(self, text: str) -> List[float]:
+        provider = os.getenv("EMBEDDING_PROVIDER", "openai").lower()
+        model = os.getenv("EMBEDDING_MODEL", "text-embedding-ada-002")
+    
+        if provider == "jina":
+            return await self._generate_jina_embedding(text)
+        else:
+            return await self._generate_litellm_embedding(text, provider, model)
+    
+    async def _generate_jina_embedding(self, text: str) -> List[float]:
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.jina_api_key}",
@@ -263,27 +273,40 @@ Your response should be in the following JSON format:
             ) as response:
                 result = await response.json()
                 return result["data"][0]["embedding"]
-
-    @staticmethod
-    def _sanitize_label(label: str) -> str:
-        # Ensure the label starts with a letter
-        if not label[0].isalpha():
-            label = "N" + label
-        # Replace any non-alphanumeric characters with underscores
-        return "".join(c if c.isalnum() else "_" for c in label)
-
-    @staticmethod
-    def _generate_node_id(label: str, data: Dict[str, Any]) -> str:
-        key_fields = ["id", "uuid", "name", "email"]
-        key_data = {k: v for k, v in data.items() if k in key_fields}
-
-        if not key_data:
-            key_data = data
-
-        data_str = json.dumps(key_data, sort_keys=True)
-        hash_object = hashlib.md5((label + data_str).encode())
-        return hash_object.hexdigest()
-
+    
+    async def _generate_litellm_embedding(self, text: str, provider: str, model: str) -> List[float]:
+        try:
+            response = await litellm.aembedding(
+                model=model,
+                input=[text],
+                api_base=os.getenv(f"{provider.upper()}_API_BASE"),
+                api_key=os.getenv(f"{provider.upper()}_API_KEY"),
+            )
+            return response["data"][0]["embedding"]
+        except Exception as e:
+            logger.error(f"Error generating embedding with {provider}: {str(e)}")
+            raise
+    
+        @staticmethod
+        def _sanitize_label(label: str) -> str:
+            # Ensure the label starts with a letter
+            if not label[0].isalpha():
+                label = "N" + label
+            # Replace any non-alphanumeric characters with underscores
+            return "".join(c if c.isalnum() else "_" for c in label)
+    
+        @staticmethod
+        def _generate_node_id(label: str, data: Dict[str, Any]) -> str:
+            key_fields = ["id", "uuid", "name", "email"]
+            key_data = {k: v for k, v in data.items() if k in key_fields}
+    
+            if not key_data:
+                key_data = data
+    
+            data_str = json.dumps(key_data, sort_keys=True)
+            hash_object = hashlib.md5((label + data_str).encode())
+            return hash_object.hexdigest()
+    
     async def _search_relevant_api_urls(
         self, queries: Union[str, List[str]], top_k: int = 3
     ) -> List[List[Tuple[str, str, float]]]:

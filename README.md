@@ -1,4 +1,3 @@
-
 # MagicTables
 
 MagicTables is an advanced Python library designed to streamline data preparation and exploration for data scientists. It provides a declarative approach to data handling, allowing you to focus on analysis and model development without getting bogged down in data engineering tasks.
@@ -47,6 +46,7 @@ asyncio.run(fetch_popular_movies())
 ```
 
 Output:
+
 ```
 Fetching popular movies...
 shape: (20, 17)
@@ -74,7 +74,7 @@ async def fetch_movie_details():
     popular_movies = await MagicTable.from_api(
         f"https://api.themoviedb.org/3/movie/popular?api_key={API_KEY}"
     )
-    
+
     movie_details = await popular_movies.chain(
         api_url=f"https://api.themoviedb.org/3/movie/{{id}}?api_key={API_KEY}",
     )
@@ -84,6 +84,7 @@ asyncio.run(fetch_movie_details())
 ```
 
 Output:
+
 ```
 Chaining API calls for movie details...
 shape: (20, 30)
@@ -109,11 +110,11 @@ async def analyze_high_rated_movies():
     popular_movies = await MagicTable.from_api(
         f"https://api.themoviedb.org/3/movie/popular?api_key={API_KEY}"
     )
-    
+
     movie_details = await popular_movies.chain(
         api_url=f"https://api.themoviedb.org/3/movie/{{id}}?api_key={API_KEY}",
     )
-    
+
     result = await movie_details.transform(
         "Find popular movies with a vote average greater than 7.5"
     )
@@ -123,6 +124,7 @@ asyncio.run(analyze_high_rated_movies())
 ```
 
 Output:
+
 ```
 Querying across chained data...
 query 65898df8aeebe4b88058a9e8cbd22822
@@ -176,6 +178,7 @@ if __name__ == "__main__":
 ```
 
 This example demonstrates:
+
 1. API data fetching
 2. API chaining for detailed information
 3. Natural language querying
@@ -202,15 +205,15 @@ async def convert_to_pandas():
     popular_movies = await MagicTable.from_api(
         f"https://api.themoviedb.org/3/movie/popular?api_key={API_KEY}"
     )
-    
+
     # Perform a transformation
     high_rated_movies = await popular_movies.transform(
         "Find movies with a vote average greater than 7.5"
     )
-    
+
     # Convert to pandas DataFrame
     pandas_df = high_rated_movies.to_pandas()
-    
+
     # Now you can use pandas operations
     print(pandas_df.head())
     print(pandas_df.describe())
@@ -219,6 +222,7 @@ asyncio.run(convert_to_pandas())
 ```
 
 Output:
+
 ```
                  title  vote_average release_date
 0  Deadpool & Wolverine          7.8   2024-07-24
@@ -237,13 +241,13 @@ max        7.800000
 ```
 
 In this example, we:
+
 1. Fetch movie data using MagicTables
 2. Perform a transformation to find high-rated movies
 3. Convert the result to a pandas DataFrame using the `to_pandas()` method
 4. Use pandas operations like `head()` and `describe()` on the converted DataFrame
 
 This allows you to seamlessly integrate MagicTables with existing pandas-based workflows or libraries that expect pandas DataFrames as input.
-
 
 ## Advanced Features
 
@@ -278,7 +282,6 @@ The library leverages AI to generate API descriptions and even pandas code for c
 7. **Reduced Boilerplate**: Eliminate repetitive code for data fetching, cleaning, and transformation.
 8. **Exploratory Freedom**: Quickly test ideas and hypotheses without complex setup.
 
-
 ## Configuration
 
 ### Environment Variables
@@ -291,7 +294,6 @@ Required environment variables:
 - `NEO4J_USER`: Your Neo4j username
 - `NEO4J_PASSWORD`: Your Neo4j password
 - `OPENAI_API_KEY`: Your OpenAI API key for natural language processing features
-- `JINA_API_KEY`: Your Jina AI API key for embedding generation
 
 Optional environment variables:
 
@@ -300,6 +302,16 @@ Optional environment variables:
 - `LLM_PROVIDER`: The LLM provider to use (options: "openai", "openrouter", "ollama"; default: "openai")
 - `OPENROUTER_API_KEY`: Your OpenRouter API key (if using OpenRouter as LLM provider)
 - `OLLAMA_API_KEY`: Your Ollama API key (if using Ollama as LLM provider)
+- `EMBEDDING_PROVIDER`: The provider to use for embeddings (e.g., "openai", "cohere", "azure", etc.)
+- `EMBEDDING_MODEL`: The specific model to use for embeddings
+- `{PROVIDER}_API_KEY`: The API key for the chosen provider (e.g., `OPENAI_API_KEY`)
+- `{PROVIDER}_API_BASE`: The API base URL for the chosen provider (if needed)
+- `AI_PROVIDER`: The provider to use for the `call_ai_model` function
+- `JINA_API_KEY`: Your Jina AI API key for embedding generation and document parsing
+
+### Embedding and LLM Configuration
+
+MagicTables now supports flexible configuration for embedding generation and Language Model interactions. To use different embedding or LLM providers, simply set the appropriate environment variables as listed above.
 
 ### Neo4j Configuration
 
@@ -311,7 +323,20 @@ If you want to store data and leverage full data querying capabilities, you need
 
 3. Create a new database or use an existing one.
 
+```bash
+docker run \
+    --name neo4j-magictables \
+    -p 7474:7474 -p 7687:7687 \
+    -e NEO4J_AUTH=neo4j/your_password \
+    -e NEO4J_apoc_export_file_enabled=true \
+    -e NEO4J_apoc_import_file_enabled=true \
+    -e NEO4J_apoc_import_file_use__neo4j__config=true \
+    -e NEO4J_PLUGINS=["graph-data-science"] \
+    neo4j:latest
+```
+
 4. Set the environment variables:
+
    - Set `NEO4J_URI` to the URI of your Neo4j instance (e.g., `bolt://localhost:7687`)
    - Set `NEO4J_USER` to your Neo4j username (default is usually "neo4j")
    - Set `NEO4J_PASSWORD` to your Neo4j password
@@ -333,6 +358,7 @@ Make sure to add `.env` to your `.gitignore` file to avoid exposing sensitive in
 
 ## Fallback Behavior
 
+(Work In Progress - we want to make the library not be 100% reliant on a database for neo4j for every installation.)
 When Neo4j is not configured or unavailable, MagicTables uses a hybrid driver that falls back to local file storage with JSON-based caching. This allows basic functionality to continue working, but with some limitations:
 
 1. Data persistence is limited to what can be efficiently stored in JSON format.
@@ -341,7 +367,6 @@ When Neo4j is not configured or unavailable, MagicTables uses a hybrid driver th
 4. Cross-session persistence is limited to the data that can be saved in the cache file.
 
 To get the full benefits of MagicTables, including efficient caching, complex graph operations, and robust cross-session persistence, it's recommended to set up and use Neo4j as described in the Configuration section.
-
 
 ## Contributing
 

@@ -196,11 +196,14 @@ class HybridSession:
             self._neo4j_session = None
 
     async def run(self, query: str, parameters: Dict[str, Any] = None, **kwargs):
-        neo4j_session = await self._get_neo4j_session()
-        if neo4j_session:
-            return await neo4j_session.run(query, parameters, **kwargs)
-        else:
-            # Use cache-only logic here
+        try:
+            neo4j_session = await self._get_neo4j_session()
+            if neo4j_session:
+                return await neo4j_session.run(query, parameters, **kwargs)
+            else:
+                # Use cache-only logic here
+                return await self._run_from_cache(query, parameters, **kwargs)
+        except:
             return await self._run_from_cache(query, parameters, **kwargs)
 
     async def _run_from_cache(
