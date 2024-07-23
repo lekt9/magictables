@@ -7,7 +7,7 @@ import os
 from typing import List, Dict, Any, Optional
 
 import aiofiles
-from neo4j import AsyncDriver, AsyncGraphDatabase, basic_auth
+from neo4j import AsyncDriver, AsyncGraphDatabase, Query, basic_auth
 
 logging.basicConfig(filename="example.log", level=logging.DEBUG)
 
@@ -185,10 +185,12 @@ class HybridSession:
         if not self.driver._data:
             await self.driver._load_cache()
 
+        query_str = query.text if isinstance(query, Query) else query
+
         # Check if the query is a MATCH query that we can handle with the cache
-        if "MATCH" in query:
+        if "MATCH" in query_str:
             try:
-                node_type = query.split("(")[1].split(":")[1].split(")")[0]
+                node_type = query_str.split("(")[1].split(":")[1].split(")")[0]
                 cached_data = self.driver._data.get(node_type, [])
                 if cached_data:
                     cache_used = True
@@ -206,16 +208,15 @@ class HybridSession:
         result = await neo4j_session.run(query, parameters, **kwargs)
 
         # Store the result in the cache if it's a MATCH query
-        if "MATCH" in query:
+        if "MATCH" in query_str:
             try:
-                node_type = query.split("(")[1].split(":")[1].split(")")[0]
+                node_type = query_str.split("(")[1].split(":")[1].split(")")[0]
                 data = await result.data()
                 self.driver._data[node_type] = data
                 await self.driver._save_cache()
             except IndexError:
                 # If we can't parse the node type, we won't cache the result
                 pass
-
         end_time = time.time()
         execution_time = end_time - start_time
         cache_status = "Cache miss" if not cache_used else "Cache not applicable"
