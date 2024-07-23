@@ -1,3 +1,8 @@
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 import asyncio
 import os
 import aiohttp
@@ -12,6 +17,7 @@ from neo4j import AsyncGraphDatabase, AsyncDriver, basic_auth
 from magictables.utils import call_ai_model, flatten_nested_structure
 from dotenv import load_dotenv
 import urllib.parse
+import pandas as pd
 
 load_dotenv()
 
@@ -436,19 +442,194 @@ Your response should be in the following JSON format:
                     labels.append(label.split(":")[-1])
         return list(set(labels))
 
-    @classmethod
-    async def from_query(cls, natural_query: str) -> "MagicTable":
-        instance = cls()
-        cypher_query = await instance._generate_cypher_query(natural_query)
-        result_df = await instance._execute_cypher(cypher_query)
-        await instance._store_cypher_query(natural_query, cypher_query)
-        return cls(result_df)
+    async def transform(self, natural_query: str) -> "MagicTable":
+        result_df = await self._generate_and_execute_pandas_code(
+            self.to_pandas(), natural_query
+        )
+
+        result_df = pl.from_pandas(result_df)
+
+        return MagicTable(result_df)
+
+    async def _generate_and_execute_pandas_code(
+        self, pandas_df: pd.DataFrame, query: str
+    ) -> pd.DataFrame:
+        # Get a sample of the DataFrame (e.g., first 5 rows)
+        sample_data = pandas_df.head(5).to_dict(orient="records")
+
+        prompt = f"""Given the following pandas DataFrame structure and the query, generate Python code to process or analyze the data using pandas.
+
+What we are trying to achieve:
+Find popular movies with a vote average greater than 7.5 and list their cast members who are older than 40
+
+Current DataFrame you must only work with:
+DataFrame Structure:
+Columns: {pandas_df.columns.tolist()}
+Shape: {pandas_df.shape}
+Data Types:
+{pandas_df.dtypes}
+
+Sample Data (first 5 rows):
+{pandas_df.head(10).to_string()}
+
+Please provide Python code to process this DataFrame, adhering to the following guidelines:
+1. Only use columns that exist in the DataFrame. Do not reference any columns not listed above.
+2. Ensure all operations are efficient and use pandas vectorized operations where possible.
+3. Handle potential data type issues, especially for date/time columns or numeric calculations.
+4. The code should return a pandas DataFrame as the result.
+5. Do not include any print statements or comments in the code.
+6. The input DataFrame is named 'df'.
+7. If the DataFrame is empty or missing required columns, create a sample DataFrame with the necessary columns.
+8. When working with dates, always use pd.to_datetime() for conversion and handle potential errors.
+9. For age calculations, use a method that works across different pandas versions, avoiding timedelta conversions to years.
+10. You MUST only use pandas and no other libraries.
+
+These are merely EXAMPLES of code. They do NOT apply to the dataframe above:
+
+1. Query: "Calculate the average price for each category"
+{{"pandas_code": "
+if df.empty or 'category' not in df.columns or 'price' not in df.columns:
+    df = pd.DataFrame({{'category': ['A', 'B', 'A', 'C'], 'price': [10, 20, 15, 25]}})
+result = df.groupby('category')['price'].mean().reset_index()
+"}}
+
+2. Query: "Find the top 5 products by sales volume"
+{{"pandas_code": "
+if df.empty or 'product' not in df.columns or 'sales_volume' not in df.columns:
+    df = pd.DataFrame({{'product': ['P1', 'P2', 'P3', 'P4', 'P5', 'P6'], 'sales_volume': [100, 150, 80, 200, 120, 90]}})
+result = df.sort_values('sales_volume', ascending=False).head(5)
+"}}
+
+3. Query: "Find popular movies with a vote average greater than 7.5 and list their cast members who are older than 40"
+{{"pandas_code": "
+if df.empty or 'movie_title' not in df.columns or 'vote_average' not in df.columns or 'cast_name' not in df.columns or 'birth_date' not in df.columns:
+    df = pd.DataFrame({{
+        'movie_title': ['Movie A', 'Movie B', 'Movie C', 'Movie D'],
+        'vote_average': [8.0, 7.2, 7.8, 7.9],
+        'cast_name': ['Actor 1', 'Actor 2', 'Actor 3', 'Actor 4'],
+        'birth_date': ['1970-01-01', '1985-01-01', '1960-01-01', '1975-01-01']
+    }})
+
+df['vote_average'] = pd.to_numeric(df['vote_average'], errors='coerce')
+df['birth_date'] = pd.to_datetime(df['birth_date'], errors='coerce')
+current_date = pd.Timestamp.now()
+df['age'] = current_date.year - df['birth_date'].dt.year - ((current_date.month * 100 + current_date.day) < (df['birth_date'].dt.month * 100 + df['birth_date'].dt.day))
+
+popular_movies = df[df['vote_average'] > 7.5]
+older_cast = df[df['age'] > 40]
+
+result = popular_movies.merge(older_cast, on=['movie_title', 'cast_name'], suffixes=('_movie', '_cast'))
+result = result[['movie_title', 'vote_average', 'cast_name', 'age']].drop_duplicates()
+result = result.sort_values(['vote_average', 'age'], ascending=[False, False])
+"}}
+
+Your response should be in the following JSON format:
+{{"pandas_code": "Your Python code here"}}
+"""
+        response = await call_ai_model(
+            [],
+            prompt,
+            model="openrouter/anthropic/claude-3.5-sonnet:beta",
+        )
+
+        pandas_code = response.get("pandas_code", "df")
+
+        logger.debug(f"Generated pandas code: {pandas_code}")
+
+        # Execute the generated code
+        try:
+            local_vars = {"df": pandas_df, "pd": pd}
+            exec(pandas_code, globals(), local_vars)
+            result = local_vars.get("result", pandas_df)
+            if not isinstance(result, pd.DataFrame):
+                raise ValueError("The generated code did not return a pandas DataFrame")
+            logger.debug(
+                f"Pandas code executed successfully. Result shape: {result.shape}"
+            )
+            return result
+        except Exception as e:
+            logger.error(f"Error executing pandas code: {str(e)}")
+            logger.error(f"Generated code:\n{pandas_code}")
+            logger.debug("Falling back to original DataFrame")
+            return pandas_df
+
+    async def _get_database_schema(self) -> Dict[str, Any]:
+        driver = await self._get_driver()
+        async with driver.session() as session:
+            try:
+                # Use built-in Neo4j procedure to get schema information
+                result = await session.run(
+                    """
+                    CALL db.schema.visualization()
+                    YIELD nodes, relationships
+                    RETURN nodes, relationships
+                    """
+                )
+                schema = await result.single()
+
+                if schema:
+                    return {
+                        "nodes": [
+                            self._process_schema_node(node) for node in schema["nodes"]
+                        ],
+                        "relationships": [
+                            self._process_schema_relationship(rel)
+                            for rel in schema["relationships"]
+                        ],
+                    }
+                else:
+                    return {"nodes": [], "relationships": []}
+            except Exception as e:
+                print(f"Error retrieving database schema: {str(e)}")
+                return {"nodes": [], "relationships": []}
+
+    def _process_schema_node(self, node):
+        return {"label": node.labels[0], "properties": list(node.properties.keys())}
+
+    def _process_schema_relationship(self, relationship):
+        return {
+            "type": relationship.type,
+            "start_node": relationship.start_node.labels[0],
+            "end_node": relationship.end_node.labels[0],
+            "properties": list(relationship.properties.keys()),
+        }
+
+    async def _store_queries(
+        self, query_key: str, cypher_query: str, pandas_query: str
+    ):
+        driver = await self._get_driver()
+        async with driver.session() as session:
+            await session.run(
+                """
+                MERGE (q:QueryNode {key: $query_key})
+                SET q.cypher_query = $cypher_query,
+                    q.pandas_query = $pandas_query
+                """,
+                query_key=query_key,
+                cypher_query=cypher_query,
+                pandas_query=pandas_query,
+            )
+
+    async def _get_stored_queries(self, query_key: str) -> Optional[Tuple[str, str]]:
+        driver = await self._get_driver()
+        async with driver.session() as session:
+            result = await session.run(
+                """
+                MATCH (q:QueryNode {key: $query_key})
+                RETURN q.cypher_query, q.pandas_query
+                """,
+                query_key=query_key,
+            )
+            stored_queries = await result.single()
+
+        return (stored_queries[0], stored_queries[1]) if stored_queries else None
 
     async def chain(
         self,
         api_url: Union[str, Dict[str, str]],
         key: Optional[str] = None,
         params: Optional[Dict[str, Any]] = None,
+        expand: bool = False,
     ) -> "MagicTable":
         if isinstance(api_url, str):
             if key is None:
@@ -457,10 +638,8 @@ Your response should be in the following JSON format:
         else:
             api_url_dict = api_url
 
-        print("key", key)
-
-        async def process_row(row: Dict[str, Any]) -> Dict[str, Any]:
-            results = {}
+        async def process_row(row: Dict[str, Any]) -> List[Dict[str, Any]]:
+            results = []
             for col, url_template in api_url_dict.items():
                 key_value = row[col]
                 url = url_template.format(**{col: key_value})
@@ -469,11 +648,17 @@ Your response should be in the following JSON format:
                         async with session.get(url, params=params) as response:
                             data = await response.json()
                     flattened_data = flatten_nested_structure(data)
-                    results = flattened_data[0] if flattened_data else {}
-                    results[key] = key_value  # Add the key to the results for joining
+                    if expand and isinstance(flattened_data, list):
+                        for item in flattened_data:
+                            item[key] = key_value
+                            results.append(item)
+                    else:
+                        results = flattened_data if flattened_data else [{}]
+                        for item in results:
+                            item[key] = key_value
                 except Exception as e:
                     print(f"Error fetching data for {col}: {str(e)}")
-                    results = {key: key_value}  # Ensure the key is always present
+                    results.append({key: key_value})
             return results
 
         async def process_all_rows():
@@ -482,9 +667,10 @@ Your response should be in the following JSON format:
 
         try:
             results = await process_all_rows()
+            flattened_results = [item for sublist in results for item in sublist]
 
             # Create a new DataFrame with the flattened API results
-            api_df = pl.DataFrame(results)
+            api_df = pl.DataFrame(flattened_results)
 
             # Get the set of existing column names
             existing_columns = set(self.columns)
@@ -502,7 +688,10 @@ Your response should be in the following JSON format:
                 raise ValueError(f"Key column '{key}' not found in both DataFrames")
 
             # Join the original DataFrame with the API results
-            joined_df = self.join(api_df, on=key, how="left")
+            if expand:
+                joined_df = self.join(api_df, on=key, how="left")
+            else:
+                joined_df = self.join(api_df, on=key, how="left")
 
             return MagicTable(joined_df)
 

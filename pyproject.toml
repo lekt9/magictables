@@ -20,6 +20,7 @@ pandas = "^2.2.2"
 bs4 = "^0.0.2"
 scikit-learn = "^1.5.1"
 neo4j = "^5.22.0"
+pyarrow = "^17.0.0"
 
 
 [build-system]
