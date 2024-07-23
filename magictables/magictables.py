@@ -1,334 +1,379 @@
-import numpy as np
-from tinydb import TinyDB, Query
-import polars as pl
-from typing import List, Dict, Any, Optional, Tuple
-import json
-from datetime import datetime
 import os
+import dateparser
+import polars as pl
 import requests
-from magictables.utils import call_ai_model
+import json
+from typing import Dict, Any, Optional, List, Tuple
+from neo4j import GraphDatabase, Query
+import hashlib
 
-INTERNAL_COLUMNS = [
-    "data",
-    "embedding_id",
-    "source",
-    "target",
-    "relationship",
-    "source_name",
-    "route_name",
-    "identifier",
-    "cache_key",
-]
+from magictables.utils import call_ai_model, flatten_nested_structure
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
-class GraphNode:
-    def __init__(
-        self, id: str, data: Dict[str, Any], embedding: Optional[List[float]] = None
-    ):
-        self.id = id
-        self.data = data
-        self.embedding = embedding
-
-
-class GraphEdge:
-    def __init__(self, source: str, target: str, relationship: str):
-        self.source = source
-        self.target = target
-        self.relationship = relationship
-
-
-class MagicTable:
-    _instance = None
-    _index = None
+class MagicDataFrame(pl.DataFrame):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.openai_api_key = "your_openai_api_key_here"
+        self.neo4j_uri = os.getenv("NEO4J_URI", "bolt://localhost:7687")
+        self.neo4j_user = os.getenv("NEO4J_USER", "neo4j")
+        self.neo4j_password = os.getenv("NEO4J_PASSWORD", "password")
+        self.jina_api_key = os.getenv("JINA_API_KEY")
+        self.api_urls = []
 
     @classmethod
-    def get_instance(cls):
-        if cls._instance is None:
-            cls._instance = cls()
-        return cls._instance
+    def from_polars(cls, df: pl.DataFrame, label: str) -> "MagicDataFrame":
+        magic_df = cls(df)
+        # Generate a dummy API URL and description for consistency
+        api_url = f"local://{label}"
+        description = f"Local DataFrame: {label}"
+        embedding = magic_df._generate_embedding(description)
+        magic_df._store_in_neo4j(label, api_url, description, embedding)
+        return magic_df
 
-    def __init__(self):
-        db_path = os.path.join(os.getcwd(), "magic.json")
-        self.db = TinyDB(db_path)
-        self._create_system_tables()
-        self._initialize_index()
-        self.last_analysis_result = None
-        self.jina_api_key = (
-            "jina_bb47710a966b4a5dbe209b7e4df0a546B5Tg812DLcdbCccNNwivqeK6kX4m"
+    @classmethod
+    def from_api(
+        cls, api_url: str, params: Optional[Dict[str, Any]] = None
+    ) -> "MagicDataFrame":
+        response = requests.get(api_url, params=params)
+        data = response.json()
+
+        data = flatten_nested_structure(data)
+
+        df = cls(data)
+
+        label = api_url.split("/")[-1].capitalize()
+
+        description = df._generate_api_description(api_url, data)
+        embedding = df._generate_embedding(description)
+
+        df._store_in_neo4j(label, api_url, description, embedding)
+        df.api_urls.append(api_url)
+        return df
+
+    def _generate_api_description(
+        self, api_url: str, data: List[Dict[str, Any]]
+    ) -> str:
+        prompt = (
+            """Generate a concise description of this API endpoint based on the URL and data sample.
+
+    Examples:
+    1. URL: https://api.example.com/users
+    Data: [{"id": 1, "name": "John Doe", "email": "john@example.com"}]
+    Description: "This API endpoint provides user information including user ID, name, and email address."
+
+    2. URL: https://api.example.com/products
+    Data: [{"id": 101, "name": "Laptop", "price": 999.99, "category": "Electronics"}]
+    Description: "This API endpoint returns product details such as product ID, name, price, and category."
+
+    3. URL: https://api.example.com/orders
+    Data: [{"order_id": "ORD-001", "user_id": 1, "total": 1299.99, "status": "shipped"}]
+    Description: "This API endpoint provides order information including order ID, associated user ID, total amount, and current status."
+
+    Please provide a similar concise description for the given API endpoint:"""
+            + api_url
         )
 
-    def _create_system_tables(self):
-        self.nodes = self.db.table("nodes")
-        self.edges = self.db.table("edges")
-        self.routes = self.db.table("routes")
-        self.cached_results = self.db.table("cached_results")
-        self.cached_relationships = self.db.table("cached_relationships")
+        response = call_ai_model(data, prompt)
+        return response.get("description", "Error generating API description")
 
-    def _initialize_index(self):
-        if self._index is None:
-            self._index = []  # Initialize as an empty list
-
-    def _data_to_text(self, data: Dict[str, Any]) -> str:
-        """Convert a dictionary of data to a string representation."""
-        return json.dumps(data, sort_keys=True)
-
-    def _text_to_embedding(self, text: str) -> List[float]:
-        """Convert text to an embedding using Jina AI API."""
-        url = "https://api.jina.ai/v1/embeddings"
+    def _generate_embedding(self, text: str) -> List[float]:
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.jina_api_key}",
         }
         data = {
-            "model": "jina-embeddings-v2-base-en",
+            "model": "jina-clip-v1",
             "embedding_type": "float",
-            "input": [text],
+            "input": [{"text": text}],
         }
-        response = requests.post(url, headers=headers, json=data)
-        response.raise_for_status()
+        response = requests.post(
+            "https://api.jina.ai/v1/embeddings", headers=headers, json=data
+        )
         return response.json()["data"][0]["embedding"]
 
-    def add_node(self, node: GraphNode):
-        text_representation = self._data_to_text(node.data)
-        embedding = self._text_to_embedding(text_representation)
-        self._index.append(embedding)
-
-        # Use the node's id if it exists, otherwise generate a new one
-        node_id = node.id if node.id else str(len(self._index))
-
-        self.nodes.insert(
-            {"id": node_id, "data": node.data, "embedding_id": len(self._index) - 1}
-        )
-
-        # Update the node's id if it was newly generated
-        if not node.id:
-            node.id = node_id
-
-    def add_edge(self, edge: GraphEdge):
-        self.edges.insert(
-            {
-                "source": edge.source,
-                "target": edge.target,
-                "relationship": edge.relationship,
-            }
-        )
-
-    def get_node(self, node_id: str) -> Optional[GraphNode]:
-        Node = Query()
-        result = self.nodes.get(Node.id == node_id)
-        if result:
-            # Use the id from the database, which is the same as the input node_id
-            return GraphNode(id=result["id"], data=result["data"], embedding=None)
-        return None
-
-    def get_neighbors(self, node_id: str) -> List[GraphNode]:
-        Edge = Query()
-        neighbor_edges = self.edges.search(
-            (Edge.source == node_id) | (Edge.target == node_id)
-        )
-        neighbor_ids = set(
-            [edge["source"] for edge in neighbor_edges if edge["target"] == node_id]
-            + [edge["target"] for edge in neighbor_edges if edge["source"] == node_id]
-        )
-        return [self.get_node(nid) for nid in neighbor_ids if nid != node_id]
-
-    def add_route(self, source_name: str, route_name: str, url: str, query: str):
-        self.routes.insert(
-            {
-                "source_name": source_name,
-                "route_name": route_name,
-                "url": url,
-                "query": query,
-            }
-        )
-
-    def get_route(self, source_name: str, route_name: str) -> Dict[str, str]:
-        Route = Query()
-        result = self.routes.get(
-            (Route.source_name == source_name) & (Route.route_name == route_name)
-        )
-        return result if result else {}
-
-    def predict_identifier(self, data: pl.DataFrame) -> str:
-        input_data = {
-            "columns": data.columns,
-            "sample_data": data.head().to_dict(as_series=False),
-        }
-        prompt = """
-        Analyze the given columns and sample data. Suggest the best column or combination of columns to use as a unique identifier (primary key) for this data.
-        Consider factors like uniqueness, stability, and meaningfulness of the data.
-        Return a JSON object with a single key 'identifier', whose value is either a single column name or a list of column names to be used together as a composite key.
-        """
-        result = call_ai_model(input_data, prompt)
-        return result["identifier"]
-
-    def cache_result(self, source_name: str, identifier: str, result: Dict[str, Any]):
-        timestamp = str(datetime.now())
-        self.cached_results.insert(
-            {
-                "source_name": source_name,
-                "identifier": identifier,
-                "result": result,
-                "timestamp": timestamp,
-            }
-        )
-
-    def get_cached_result(
-        self, source_name: str, identifier: str
-    ) -> Optional[Dict[str, Any]]:
-        CachedResult = Query()
-        result = self.cached_results.get(
-            (CachedResult.source_name == source_name)
-            & (CachedResult.identifier == identifier)
-        )
-        return result["result"] if result else None
-
-    def find_similar_cached_result(
-        self, source_name: str, data: pl.DataFrame
-    ) -> Optional[Dict[str, Any]]:
-        try:
-            identifier = self.predict_identifier(data)
-            if isinstance(identifier, list):
-                identifier_value = tuple(data[col][0] for col in identifier)
-            else:
-                identifier_value = data[identifier][0]
-
-            return self.get_cached_result(source_name, str(identifier_value))
-        except:
-            return None
-
-    def cache_relationships(
-        self, cache_key: str, relationships: List[Tuple[str, str, float]]
+    def _store_in_neo4j(
+        self, label: str, api_url: str, description: str, embedding: List[float]
     ):
-        self.cached_relationships.upsert(
-            {
-                "cache_key": cache_key,
-                "relationships": relationships,
-                "timestamp": str(datetime.now()),
-            },
-            Query().cache_key == cache_key,
+        driver = GraphDatabase.driver(
+            self.neo4j_uri, auth=(self.neo4j_user, self.neo4j_password)
         )
 
-    def get_cached_relationships(
-        self, cache_key: str
-    ) -> Optional[List[Tuple[str, str, float]]]:
-        CachedRelationships = Query()
-        result = self.cached_relationships.get(
-            CachedRelationships.cache_key == cache_key
-        )
-        return result["relationships"] if result else None
-
-    def invalidate_cache(self, source_name: str):
-        CachedResult = Query()
-        self.cached_results.remove(CachedResult.source_name == source_name)
-
-    def to_dataframe(self, table_name: str) -> pl.DataFrame:
-        table = self.db.table(table_name)
-        df = pl.DataFrame(table.all())
-        return df.select([col for col in df.columns if col not in INTERNAL_COLUMNS])
-
-    def get_relationships(self, source: str) -> List[Dict[str, str]]:
-        Edge = Query()
-        edges = self.edges.search(Edge.source == source)
-        return [
-            {"target": edge["target"], "relationship": edge["relationship"]}
-            for edge in edges
-        ]
-
-    def add_relationship(self, source: str, target: str, relationship: str):
-        self.edges.insert(
-            {"source": source, "target": target, "relationship": relationship}
-        )
-
-    def find_similar_nodes(
-        self, query_data: Dict[str, Any], top_k: int = 5
-    ) -> List[GraphNode]:
-        query_text = self._data_to_text(query_data)
-        query_embedding = self._text_to_embedding(query_text)
-
-        similarities = []
-        for idx, embedding in enumerate(self._index):
-            similarity = np.dot(query_embedding, embedding) / (
-                np.linalg.norm(query_embedding) * np.linalg.norm(embedding)
+        with driver.session() as session:
+            session.run(
+                """
+                MERGE (n:APIEndpoint {url: $api_url})
+                SET n.description = $description,
+                    n.embedding = $embedding
+                """,
+                api_url=api_url,
+                description=description,
+                embedding=embedding,
             )
-            similarities.append((idx, similarity))
 
-        top_k_indices = sorted(similarities, key=lambda x: x[1], reverse=True)[:top_k]
+            for row in self.to_dicts():
+                standardized_row = self._standardize_data_types(row)
+                node_id = self._generate_node_id(label, standardized_row)
+                query = Query(
+                    f"""
+                    MERGE (d:{label} {{id: $node_id}})
+                    SET d += $row
+                    WITH d
+                    MATCH (a:APIEndpoint {{url: $api_url}})
+                    MERGE (d)-[:SOURCED_FROM]->(a)
+                    """  # type: ignore
+                )
+                session.run(
+                    query,
+                    node_id=node_id,
+                    row=standardized_row,
+                    api_url=api_url,
+                )
 
-        similar_nodes = []
-        for idx, _ in top_k_indices:
-            Node = Query()
-            node = self.nodes.get(Node.embedding_id == idx)
-            if node:
-                similar_nodes.append(GraphNode(node["id"], node["data"], None))
+        driver.close()
 
-        return similar_nodes
+    @staticmethod
+    def _generate_node_id(label: str, data: Dict[str, Any]) -> str:
+        key_fields = ["id", "uuid", "name", "email"]
+        key_data = {k: v for k, v in data.items() if k in key_fields}
 
-    def smart_parse(self, data: Dict[str, Any]) -> pl.DataFrame:
-        input_data = {"raw_data": data}
-        prompt = "Parse the given raw data. Identify key entities, attributes, and relationships. Return a JSON object with the parsed and structured data."
-        result = call_ai_model(input_data, prompt)
+        if not key_data:
+            key_data = data
 
-        return pl.DataFrame(result)
+        data_str = json.dumps(key_data, sort_keys=True)
+        hash_object = hashlib.md5((label + data_str).encode())
+        return hash_object.hexdigest()
 
-    def store_execution_details(
-        self, source_name: str, execution_details: Dict[str, Any]
-    ):
-        """
-        Store execution details for a given source.
-        """
-        self.db.table("execution_details").insert(
-            {
-                "source_name": source_name,
-                "details": execution_details,
-                "timestamp": str(datetime.now()),
-            }
+    def _search_relevant_api_urls(
+        self, query: str, top_k: int = 3
+    ) -> List[Tuple[str, str, float]]:
+        query_embedding = self._generate_embedding(query)
+
+        driver = GraphDatabase.driver(
+            self.neo4j_uri, auth=(self.neo4j_user, self.neo4j_password)
         )
 
-    def get_execution_details(self, source_name: str) -> List[Dict[str, Any]]:
-        """
-        Retrieve execution details for a given source.
-        """
-        ExecutionDetails = Query()
-        return self.db.table("execution_details").search(
-            ExecutionDetails.source_name == source_name
+        with driver.session() as session:
+            result = session.run(
+                """
+                MATCH (a:APIEndpoint)
+                WITH a, gds.similarity.cosine(a.embedding, $query_embedding) AS similarity
+                ORDER BY similarity DESC
+                LIMIT $top_k
+                RETURN a.url, a.description, similarity
+                """,
+                query_embedding=query_embedding,
+                top_k=top_k,
+            )
+
+            relevant_urls = [
+                (record["a.url"], record["a.description"], record["similarity"])
+                for record in result
+            ]
+
+        driver.close()
+        return relevant_urls
+
+    def _generate_query_key(
+        self, natural_query: str, relevant_urls: List[Tuple[str, str, float]]
+    ) -> str:
+        # Sort the URLs to ensure consistency
+        sorted_urls = sorted([url for url, _, _ in relevant_urls])
+        # Combine the query and URLs into a single string
+        combined_string = f"{natural_query}|{'|'.join(sorted_urls)}"
+        # Generate a hash of the combined string
+        return hashlib.md5(combined_string.encode()).hexdigest()
+
+    def _generate_cypher_query(self, natural_query: str) -> str:
+        relevant_urls = self._search_relevant_api_urls(natural_query)
+        query_key = self._generate_query_key(natural_query, relevant_urls)
+
+        # Check if we have a stored query for this key
+        stored_query = self._get_stored_cypher_query(query_key)
+        if stored_query:
+            return stored_query
+
+        # Get a sample of the DataFrame (e.g., first 5 rows)
+        sample_data = self.head(5).to_dicts()
+
+        # Format relevant URLs for the prompt
+        url_info = "\n".join(
+            [
+                f"URL: {url}, Description: {desc}, Similarity: {sim:.2f}"
+                for url, desc, sim in relevant_urls
+            ]
+        )
+        column_types = self.dtypes
+        type_info = "\n".join(
+            [f"{self.columns[i]}: {dtype}" for i, dtype in enumerate(column_types)]
         )
 
-    def analyze(self, query: str) -> pl.DataFrame:
-        input_data = {
-            "data": self.to_dataframe("nodes").to_dict(as_series=False),
-            "query": query,
-        }
-        prompt = f"Analyze the given data based on the query: {query}. Provide insights, patterns, and recommendations. Return a JSON object with the analysis results."
-        result = call_ai_model(input_data, prompt)
+        prompt = f"""Generate a Cypher query based on the natural language query, considering the provided columns, sample data, relevant API URLs, and column data types.
 
-        # Convert the AI model's response to a DataFrame
-        return pl.DataFrame(result)
+        Relevant API URLs:
+        {url_info}
 
-    def get_analysis_result(self) -> str:
-        return (
-            self.last_analysis_result
-            if self.last_analysis_result
-            else "No analysis has been performed yet."
+        Sample Data:
+        {json.dumps(sample_data, indent=2)}
+
+        Column Data Types:
+        {type_info}
+
+        When joining or comparing columns, use appropriate type conversion functions if needed. For example:
+        - For dates, use: apoc.date.parse(column, 'ms', 'yyyy-MM-dd') for consistent comparison
+        - For numbers, use: toFloat(column) for consistent numeric comparison
+        - For strings, use: toLower(trim(column)) for case-insensitive, trimmed comparison
+
+        Examples:
+        1. Natural Query: "Find all users older than 30"
+        Cypher Query: "MATCH (n:User) WHERE toInteger(n.age) > 30 RETURN n"
+
+        2. Natural Query: "Get all products with price less than 100"
+        Cypher Query: "MATCH (p:Product) WHERE toFloat(p.price) < 100 RETURN p"
+
+        3. Natural Query: "List all orders made in the last month"
+        Cypher Query: "MATCH (o:Order) WHERE apoc.date.parse(o.date, 'ms', 'yyyy-MM-dd') >= apoc.date.parse(date() - duration('P1M'), 'ms', 'yyyy-MM-dd') RETURN o"
+
+        Natural Query: "{natural_query}"
+
+        Please provide a Cypher query for the given natural language query, considering the relevant API URLs, sample data, and column data types."""
+
+        response = call_ai_model(sample_data, prompt)
+        cypher_query = response.get("cypher_query", "Error generating Cypher query")
+        self._store_cypher_query(query_key, cypher_query)
+
+        return cypher_query
+
+    def join_with_query(self, natural_query: str) -> "MagicDataFrame":
+        cypher_query = self._generate_cypher_query(natural_query)
+        result_df = self._execute_cypher(cypher_query)
+        self._store_cypher_query_as_edge(natural_query, cypher_query)
+        return MagicDataFrame(self.join(result_df, how="left"))
+
+    def _execute_cypher(self, query: str, params: Dict[str, Any] = {}) -> pl.DataFrame:
+        driver = GraphDatabase.driver(
+            self.neo4j_uri, auth=(self.neo4j_user, self.neo4j_password)
         )
 
-    def get_related(self, node_id: str, relationship: str) -> List[GraphNode]:
-        Edge = Query()
-        related_edges = self.edges.search(
-            (Edge.source == node_id) & (Edge.relationship == relationship)
-        )
-        related_nodes = [self.get_node(edge["target"]) for edge in related_edges]
-        return related_nodes
+        with driver.session() as session:
+            result = session.run(query, params)  # type: ignore
+            records = [dict(record) for record in result]
 
-    def store_result(self, source_name: str, result: pl.DataFrame):
-        """
-        Store the result DataFrame in the database.
-        """
-        result_dict = result.to_dict(as_series=False)
-        self.db.table("results").insert(
-            {
-                "source_name": source_name,
-                "result": result_dict,
-                "timestamp": str(datetime.now()),
-            }
+        driver.close()
+        return pl.DataFrame(records)
+
+    def _standardize_data_types(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        standardized_data = {}
+        for key, value in data.items():
+            if isinstance(value, str):
+                # Attempt to parse as date
+                try:
+                    parsed_date = dateparser.parse(value)
+                    if parsed_date:
+                        standardized_data[key] = parsed_date.isoformat()
+                    else:
+                        standardized_data[key] = value.strip()
+                except:
+                    standardized_data[key] = value.strip()
+            elif isinstance(value, (int, float)):
+                standardized_data[key] = float(value)
+            else:
+                standardized_data[key] = value
+        return standardized_data
+
+    def _store_cypher_query_as_edge(self, natural_query: str, cypher_query: str):
+        relevant_urls = self._search_relevant_api_urls(natural_query)
+        query_key = self._generate_query_key(natural_query, relevant_urls)
+
+        driver = GraphDatabase.driver(
+            self.neo4j_uri, auth=(self.neo4j_user, self.neo4j_password)
         )
+
+        with driver.session() as session:
+            # Create a QueryNode for the natural language query
+            session.run(
+                """
+                MERGE (q:QueryNode {key: $query_key})
+                SET q.natural_query = $natural_query,
+                    q.cypher_query = $cypher_query
+                """,
+                query_key=query_key,
+                natural_query=natural_query,
+                cypher_query=cypher_query,
+            )
+
+            # Find the nodes involved in the Cypher query
+            involved_nodes = self._extract_node_labels(cypher_query)
+
+            # Create edges from the QueryNode to involved nodes, with the Cypher query as a property
+            for node_label in involved_nodes:
+                session.run(
+                    f"""
+                    MATCH (q:QueryNode {{query: $natural_query}}), (n:{node_label})
+                    MERGE (q)-[r:QUERIES]->(n)
+                    SET r.cypher_query = $cypher_query
+                    """,  # type: ignore
+                    natural_query=natural_query,
+                    cypher_query=cypher_query,
+                )
+
+        driver.close()
+
+    @staticmethod
+    def _extract_node_labels(cypher_query: str) -> List[str]:
+        # This is a simple extraction method and might need to be more sophisticated
+        # depending on the complexity of your Cypher queries
+        labels = []
+        parts = cypher_query.split()
+        for i, part in enumerate(parts):
+            if part == "MATCH" and i + 1 < len(parts):
+                label = parts[i + 1].strip("()")
+                if ":" in label:
+                    labels.append(label.split(":")[-1])
+        return list(set(labels))
+
+    @classmethod
+    def from_query(cls, natural_query: str) -> "MagicDataFrame":
+        instance = cls()
+        cypher_query = instance._generate_cypher_query(natural_query)
+        result_df = instance._execute_cypher(cypher_query)
+        instance._store_cypher_query_as_edge(natural_query, cypher_query)
+        return cls(result_df)
+
+    def _store_cypher_query(self, query_key: str, cypher_query: str):
+        driver = GraphDatabase.driver(
+            self.neo4j_uri, auth=(self.neo4j_user, self.neo4j_password)
+        )
+
+        with driver.session() as session:
+            session.run(
+                """
+                MERGE (q:QueryNode {key: $query_key})
+                SET q.cypher_query = $cypher_query
+                """,
+                query_key=query_key,
+                cypher_query=cypher_query,
+            )
+
+        driver.close()
+
+    def _get_stored_cypher_query(self, query_key: str) -> Optional[str]:
+        driver = GraphDatabase.driver(
+            self.neo4j_uri, auth=(self.neo4j_user, self.neo4j_password)
+        )
+
+        with driver.session() as session:
+            result = session.run(
+                """
+                MATCH (q:QueryNode {key: $query_key})
+                RETURN q.cypher_query
+                """,
+                query_key=query_key,
+            )
+            stored_query = result.single()
+
+        driver.close()
+
+        return stored_query[0] if stored_query else None

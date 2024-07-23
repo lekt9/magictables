@@ -1038,6 +1038,25 @@ files = [
 ]
 
 [[package]]
+name = "neo4j"
+version = "5.22.0"
+description = "Neo4j Bolt driver for Python"
+optional = false
+python-versions = ">=3.7"
+files = [
+    {file = "neo4j-5.22.0-py3-none-any.whl", hash = "sha256:8146755ac93d33cee594975172c15cffb68ab158e3358bb7a73b5e0b83367006"},
+    {file = "neo4j-5.22.0.tar.gz", hash = "sha256:199677239ce11fcecabce9962af515df271c1313ba110e737dd7d668fccd0c04"},
+]
+
+[package.dependencies]
+pytz = "*"
+
+[package.extras]
+numpy = ["numpy (>=1.7.0,<2.0.0)"]
+pandas = ["numpy (>=1.7.0,<2.0.0)", "pandas (>=1.1.0,<3.0.0)"]
+pyarrow = ["pyarrow (>=1.0.0)"]
+
+[[package]]
 name = "numpy"
 version = "1.26.4"
 description = "Fundamental package for array computing in Python"
@@ -2113,17 +2132,6 @@ requests = ">=2.26.0"
 blobfile = ["blobfile (>=2)"]
 
 [[package]]
-name = "tinydb"
-version = "4.8.0"
-description = "TinyDB is a tiny, document oriented database optimized for your happiness :)"
-optional = false
-python-versions = ">=3.7,<4.0"
-files = [
-    {file = "tinydb-4.8.0-py3-none-any.whl", hash = "sha256:30c06d12383d7c332e404ca6a6103fb2b32cbf25712689648c39d9a6bd34bd3d"},
-    {file = "tinydb-4.8.0.tar.gz", hash = "sha256:6dd686a9c5a75dfa9280088fd79a419aefe19cd7f4bd85eba203540ef856d564"},
-]
-
-[[package]]
 name = "tokenizers"
 version = "0.19.1"
 description = ""
@@ -2437,4 +2445,4 @@ test = ["big-O", "importlib-resources", "jaraco.functools", "jaraco.itertools", 
 [metadata]
 lock-version = "2.0"
 python-versions = ">=3.9,<3.11"
-content-hash = "58855ba7c65c128acc8f48d03d28a71d5c8aa0e5df831673e4992f880563a615"
+content-hash = "ba624ea874f11c74496b46073f8704e2f3e1264cd214ce76eee2f3564c84802e"

@@ -18,8 +18,8 @@ parsee-pdf-reader = "^0.1.6.0"
 cozo-embedded = "^0.7.6"
 pandas = "^2.2.2"
 bs4 = "^0.0.2"
-tinydb = "^4.8.0"
 scikit-learn = "^1.5.1"
+neo4j = "^5.22.0"
 
 
 [build-system]

@@ -1,11 +1,9 @@
 # utils.py
-import hashlib
 import json
 import os
-from typing import Any, Dict
+from typing import Any, Dict, List
 import requests
 from dotenv import load_dotenv
-import polars as pl
 
 import logging
 from litellm import completion
@@ -48,21 +46,7 @@ def flatten_nested_structure(nested_structure):
     return flattened_rows
 
 
-def generate_call_id(source_name: str, kwargs: dict) -> str:
-    call_data = json.dumps({"source": source_name, "params": kwargs}, sort_keys=True)
-    return hashlib.md5(call_data.encode()).hexdigest()
-
-
-def to_dataframe(data):
-    if isinstance(data, pl.DataFrame):
-        return data
-    elif isinstance(data, list):
-        return pl.DataFrame(data)
-    else:
-        raise ValueError("Unsupported data type for conversion to DataFrame")
-
-
-def call_ai_model(input_data: Dict[str, Any], prompt: str) -> Dict[str, Any]:
+def call_ai_model(input_data: List[Dict[str, Any]], prompt: str) -> Dict[str, Any]:
     api_key = None
     model = None
 
