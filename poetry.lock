@@ -2193,6 +2193,18 @@ files = [
 ]
 
 [[package]]
+name = "spycy"
+version = "0.2"
+description = "Small library for auto-currying functions and improved functional application"
+category = "main"
+optional = false
+python-versions = ">=3"
+files = [
+    {file = "spycy-0.2-py2-none-any.whl", hash = "sha256:08db6ad3243040a974a74e89a125cc29b37ddbac7ba3c492243252fc50f6c301"},
+    {file = "spycy-0.2.tar.gz", hash = "sha256:aab74b6fa7fa9b199d001424f31ec0ae3fa1ce269aa4e4ad8c84c83744bb93f4"},
+]
+
+[[package]]
 name = "threadpoolctl"
 version = "3.5.0"
 description = "threadpoolctl"
@@ -2579,4 +2591,4 @@ test = ["big-O", "importlib-resources", "jaraco.functools", "jaraco.itertools", 
 [metadata]
 lock-version = "2.0"
 python-versions = ">=3.9,<3.11"
-content-hash = "f2f96bfea440757733f75fa384682961c2af7ba04f9b63411242c14ea1f8a63c"
+content-hash = "a13dd55f463b1975ff6df487c50b00a5b3ca2a678e0bdc7021f7286c93bf2ac1"

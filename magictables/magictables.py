@@ -1,6 +1,6 @@
 import logging
 
-from magictables.hybrid_driver import HybridDriver
+from magictables.fallback_driver import FallbackAsyncGraphDatabase, FallbackAsyncDriver
 
 # Set up logging
 logging.basicConfig(level=logging.DEBUG)
@@ -12,7 +12,7 @@ import dateparser
 import polars as pl
 import json
 from typing import Dict, Any, Optional, List, Tuple, Union
-from neo4j import Query
+from neo4j import Query, basic_auth
 import hashlib
 
 from magictables.utils import call_ai_model, flatten_nested_structure
@@ -35,13 +35,13 @@ class MagicTable(pl.DataFrame):
         self.api_urls = []
         self._driver = None
 
-    async def _get_driver(self) -> HybridDriver:
+    async def _get_driver(self) -> FallbackAsyncDriver:
         if self._driver is None:
             parsed_uri = urllib.parse.urlparse(self.neo4j_uri)
             scheme = parsed_uri.scheme
             if scheme in ["bolt", "neo4j", "bolt+s", "http", "https"]:
-                self._driver = HybridDriver(
-                    self.neo4j_uri, self.neo4j_user, self.neo4j_password
+                self._driver = FallbackAsyncGraphDatabase.driver(
+                    self.neo4j_uri, basic_auth(self.neo4j_user, self.neo4j_password)
                 )
                 await self._driver._load_cache()
             else:
@@ -251,12 +251,12 @@ Your response should be in the following JSON format:
     async def _generate_embedding(self, text: str) -> List[float]:
         provider = os.getenv("EMBEDDING_PROVIDER", "openai").lower()
         model = os.getenv("EMBEDDING_MODEL", "text-embedding-ada-002")
-    
+
         if provider == "jina":
             return await self._generate_jina_embedding(text)
         else:
             return await self._generate_litellm_embedding(text, provider, model)
-    
+
     async def _generate_jina_embedding(self, text: str) -> List[float]:
         headers = {
             "Content-Type": "application/json",
@@ -273,8 +273,10 @@ Your response should be in the following JSON format:
             ) as response:
                 result = await response.json()
                 return result["data"][0]["embedding"]
-    
-    async def _generate_litellm_embedding(self, text: str, provider: str, model: str) -> List[float]:
+
+    async def _generate_litellm_embedding(
+        self, text: str, provider: str, model: str
+    ) -> List[float]:
         try:
             response = await litellm.aembedding(
                 model=model,
@@ -286,7 +288,7 @@ Your response should be in the following JSON format:
         except Exception as e:
             logger.error(f"Error generating embedding with {provider}: {str(e)}")
             raise
-    
+
         @staticmethod
         def _sanitize_label(label: str) -> str:
             # Ensure the label starts with a letter
@@ -294,19 +296,19 @@ Your response should be in the following JSON format:
                 label = "N" + label
             # Replace any non-alphanumeric characters with underscores
             return "".join(c if c.isalnum() else "_" for c in label)
-    
+
         @staticmethod
         def _generate_node_id(label: str, data: Dict[str, Any]) -> str:
             key_fields = ["id", "uuid", "name", "email"]
             key_data = {k: v for k, v in data.items() if k in key_fields}
-    
+
             if not key_data:
                 key_data = data
-    
+
             data_str = json.dumps(key_data, sort_keys=True)
             hash_object = hashlib.md5((label + data_str).encode())
             return hash_object.hexdigest()
-    
+
     async def _search_relevant_api_urls(
         self, queries: Union[str, List[str]], top_k: int = 3
     ) -> List[List[Tuple[str, str, float]]]:

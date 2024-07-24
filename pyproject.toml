@@ -20,6 +20,7 @@ scikit-learn = "^1.5.1"
 neo4j = "^5.22.0"
 pyarrow = "^17.0.0"
 aiofiles = "^24.1.0"
+spycy = "^0.2"
 
 [tool.poetry.group.m1mac.dependencies]
 polars-lts-cpu = { version = "^1.2.1", platform = "darwin", markers = "platform_machine == 'arm64'" }
