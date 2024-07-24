@@ -3,14 +3,16 @@ from magictables import MagicTable
 
 
 class NotSoMagicTable(MagicTable):
-    def __init__(self, data):
-        if isinstance(data, pd.DataFrame):
+    def __init__(self, data=None):
+        if data is None:
+            super().__init__()
+        elif isinstance(data, pd.DataFrame):
             super().__init__(data)
         elif isinstance(data, MagicTable):
             super().__init__(data.to_pandas())
             self.__dict__.update(data.__dict__)
         else:
-            raise ValueError("Input must be a pandas DataFrame or a MagicTable")
+            raise ValueError("Input must be None, a pandas DataFrame, or a MagicTable")
 
     def __getattribute__(self, name):
         try:
