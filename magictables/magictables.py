@@ -579,33 +579,33 @@ Your response should be in the following JSON format:
         else:
             prompt = f"""Given the following pandas DataFrame structure and the query, generate Python code to process or analyze the data using pandas.
 
-        What we are trying to achieve: {natural_query}
-        Find popular movies with a vote average greater than 7.5 and list their cast members who are older than 40
+What we are trying to achieve: {natural_query}
+Find popular movies with a vote average greater than 7.5 and list their cast members who are older than 40
 
-        Current DataFrame you must only work with:
-        DataFrame Structure:
-        Columns: {pandas_df.columns.tolist()}
-        Shape: {pandas_df.shape}
-        Data Types:
-        {pandas_df.dtypes}
+Current DataFrame you must only work with:
+DataFrame Structure:
+Columns: {pandas_df.columns.tolist()}
+Shape: {pandas_df.shape}
+Data Types:
+{pandas_df.dtypes}
 
-        Sample Data (first 10 rows):
-        {pandas_df.head(10).to_string()}
+Sample Data (first 10 rows):
+{pandas_df.head(10).to_string()}
 
-        Please provide Python code to process this DataFrame, adhering to the following guidelines:
-        1. Only use columns that exist in the DataFrame. Do not reference any columns not listed above.
-        2. Ensure all operations are efficient and use pandas vectorized operations where possible.
-        3. Handle potential data type issues, especially for date/time columns or numeric calculations.
-        4. The code should return a pandas DataFrame as the result.
-        5. Do not include any print statements or comments in the code.
-        6. The input DataFrame is named 'df'.
-        7. If the DataFrame is empty or missing required columns, create a sample DataFrame with the necessary columns.
-        8. When working with dates, always use pd.to_datetime() for conversion and handle potential errors.
-        9. For age calculations, use a method that works across different pandas versions, avoiding timedelta conversions to years.
-        10. You MUST only use pandas and no other libraries.
+Please provide Python code to process this DataFrame, adhering to the following guidelines:
+1. Only use columns that exist in the DataFrame. Do not reference any columns not listed above.
+2. Ensure all operations are efficient and use pandas vectorized operations where possible.
+3. Handle potential data type issues, especially for date/time columns or numeric calculations.
+4. The code should return a pandas DataFrame as the result.
+5. Do not include any print statements or comments in the code.
+6. The input DataFrame is named 'df'.
+7. If the DataFrame is empty or missing required columns, create a sample DataFrame with the necessary columns.
+8. When working with dates, always use pd.to_datetime() for conversion and handle potential errors.
+9. For age calculations, use a method that works across different pandas versions, avoiding timedelta conversions to years.
+10. You MUST only use pandas and no other libraries.
 
-        Your response should be in the following JSON format:
-        {{"pandas_code": "# Ensure all date columns are in datetime format
+Your response should be in the following JSON format:
+{{"pandas_code": "# Ensure all date columns are in datetime format
 date_columns = df.select_dtypes(include=['object']).columns[df.select_dtypes(include=['object']).apply(lambda x: pd.to_datetime(x, errors='coerce').notnull().all())]
 for col in date_columns:
     df[col] = pd.to_datetime(df[col], errors='coerce')
@@ -649,10 +649,10 @@ if 'date' in df.columns:
     df = df.sort_values('date', ascending=False)
 
 # Rename columns for clarity
-df = df.rename(columns={
+df = df.rename(columns={{
     'col1': 'feature_1',
     'col2': 'feature_2'
-})
+}})
 
 # Create a new calculated column
 if 'price' in df.columns and 'quantity' in df.columns:
@@ -672,7 +672,7 @@ df = df.reset_index(drop=True)
 
 result = df
 "}}
-        """
+"""
             response = await call_ai_model(
                 [],
                 prompt,
