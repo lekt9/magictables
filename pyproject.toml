@@ -7,20 +7,19 @@ license = "GPL-3.0"
 readme = "README.md"
 
 [tool.poetry.dependencies]
-python = ">=3.9,<3.11"
+python = ">=3.10"
 requests = "^2.32.3"
 python-dotenv = "^1.0.1"
 polars = "^1.2.1"
 dateparser = "^1.2.0"
 litellm = "^1.41.25"
-parsee-pdf-reader = "^0.1.6.0"
 pandas = "^2.2.2"
 bs4 = "^0.0.2"
 scikit-learn = "^1.5.1"
 neo4j = "^5.22.0"
 pyarrow = "^17.0.0"
 aiofiles = "^24.1.0"
-spycy = "^0.2"
+spycy-aneeshdurg = "^0.0.3"
 
 [tool.poetry.group.m1mac.dependencies]
 polars-lts-cpu = { version = "^1.2.1", platform = "darwin", markers = "platform_machine == 'arm64'" }
