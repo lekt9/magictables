@@ -3,6 +3,8 @@ import os
 from dotenv import load_dotenv
 import asyncio
 
+from magictables.notsomagictables import NotSoMagicTable
+
 load_dotenv()
 
 API_KEY = os.getenv("TMDB_API_KEY")

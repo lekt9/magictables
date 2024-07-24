@@ -47,15 +47,59 @@ class HybridResult:
         return record
 
 
+from typing import Dict, Any, List, Tuple, Iterable
+
+
 class HybridRecord:
-    def __init__(self, data: Dict[str, Any]):
-        self.data = data
+    def __init__(self, data: Dict[str, Any], keys: List[str]):
+        self._data = data
+        self._keys = keys
 
     def __getitem__(self, key):
-        return self.data.get(key)
+        if isinstance(key, (int, slice)):
+            return list(self._data.values())[key]
+        return self._data[key]
+
+    def __contains__(self, key):
+        return key in self._data
+
+    def __len__(self):
+        return len(self._data)
+
+    def __iter__(self):
+        return iter(self._data.values())
+
+    def __eq__(self, other):
+        if isinstance(other, HybridRecord):
+            return self._data == other._data and self._keys == other._keys
+        return False
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
+
+    def __repr__(self):
+        return f"<HybridRecord {self._data}>"
 
     def get(self, key, default=None):
-        return self.data.get(key, default)
+        return self._data.get(key, default)
+
+    def keys(self) -> List[str]:
+        return self._keys
+
+    def values(self) -> List[Any]:
+        return list(self._data.values())
+
+    def items(self) -> List[Tuple[str, Any]]:
+        return list(self._data.items())
+
+    def data(self) -> Dict[str, Any]:
+        return dict(self._data)
+
+    def index(self, key: str) -> int:
+        return self._keys.index(key)
+
+    def value(self, key: str) -> Any:
+        return self._data[key]
 
 
 class HybridResultSummary:

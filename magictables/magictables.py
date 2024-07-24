@@ -1,10 +1,5 @@
-import logging
-
 from magictables.fallback_driver import HybridDriver
 
-# Set up logging
-logging.basicConfig(level=logging.DEBUG)
-logger = logging.getLogger(__name__)
 import asyncio
 import os
 import aiohttp
@@ -22,6 +17,36 @@ import pandas as pd
 import litellm
 
 load_dotenv()
+
+import logging
+import os
+from logging.handlers import RotatingFileHandler
+
+# Set up logging
+log_directory = "logs"
+if not os.path.exists(log_directory):
+    os.makedirs(log_directory)
+
+log_file = os.path.join(log_directory, "magictables.log")
+
+# Create a RotatingFileHandler
+file_handler = RotatingFileHandler(log_file, maxBytes=10 * 1024 * 1024, backupCount=5)
+file_handler.setLevel(logging.DEBUG)
+
+# Create a StreamHandler for console output
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+
+# Create a formatter and set it for both handlers
+formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+file_handler.setFormatter(formatter)
+console_handler.setFormatter(formatter)
+
+# Get the root logger and add both handlers
+logger = logging.getLogger()
+logger.setLevel(logging.DEBUG)
+logger.addHandler(file_handler)
+logger.addHandler(console_handler)
 
 
 class MagicTable(pl.DataFrame):
@@ -249,7 +274,7 @@ Your response should be in the following JSON format:
         return response.get("description", "Error generating API description")
 
     async def _generate_embedding(self, text: str) -> List[float]:
-        provider = os.getenv("EMBEDDING_PROVIDER", "openai").lower()
+        provider = os.getenv("EMBEDDING_PROVIDER", "jina").lower()
         model = os.getenv("EMBEDDING_MODEL", "text-embedding-ada-002")
 
         if provider == "jina":
@@ -272,6 +297,7 @@ Your response should be in the following JSON format:
                 "https://api.jina.ai/v1/embeddings", headers=headers, json=data
             ) as response:
                 result = await response.json()
+
                 return result["data"][0]["embedding"]
 
     async def _generate_litellm_embedding(
@@ -289,25 +315,25 @@ Your response should be in the following JSON format:
             logger.error(f"Error generating embedding with {provider}: {str(e)}")
             raise
 
-        @staticmethod
-        def _sanitize_label(label: str) -> str:
-            # Ensure the label starts with a letter
-            if not label[0].isalpha():
-                label = "N" + label
-            # Replace any non-alphanumeric characters with underscores
-            return "".join(c if c.isalnum() else "_" for c in label)
+    @staticmethod
+    def _sanitize_label(label: str) -> str:
+        # Ensure the label starts with a letter
+        if not label[0].isalpha():
+            label = "N" + label
+        # Replace any non-alphanumeric characters with underscores
+        return "".join(c if c.isalnum() else "_" for c in label)
 
-        @staticmethod
-        def _generate_node_id(label: str, data: Dict[str, Any]) -> str:
-            key_fields = ["id", "uuid", "name", "email"]
-            key_data = {k: v for k, v in data.items() if k in key_fields}
+    @staticmethod
+    def _generate_node_id(label: str, data: Dict[str, Any]) -> str:
+        key_fields = ["id", "uuid", "name", "email"]
+        key_data = {k: v for k, v in data.items() if k in key_fields}
 
-            if not key_data:
-                key_data = data
+        if not key_data:
+            key_data = data
 
-            data_str = json.dumps(key_data, sort_keys=True)
-            hash_object = hashlib.md5((label + data_str).encode())
-            return hash_object.hexdigest()
+        data_str = json.dumps(key_data, sort_keys=True)
+        hash_object = hashlib.md5((label + data_str).encode())
+        return hash_object.hexdigest()
 
     async def _search_relevant_api_urls(
         self, queries: Union[str, List[str]], top_k: int = 3
@@ -1036,7 +1062,9 @@ Your response should be in the following JSON format:
         # print("query", query_key)
 
         if stored_queries and stored_queries.data:  # Check if pandas_query exists
-            pandas_query = stored_queries.data["q.pandas_code"]
+            print(stored_queries)
+
+            pandas_query = stored_queries.get("q.pandas_query")
 
             try:
                 local_vars = {"df": self.to_pandas(), "pd": pd}
