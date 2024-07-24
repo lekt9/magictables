@@ -1,6 +1,6 @@
 import logging
 
-from magictables.fallback_driver import FallbackAsyncGraphDatabase, FallbackAsyncDriver
+from magictables.fallback_driver import HybridDriver
 
 # Set up logging
 logging.basicConfig(level=logging.DEBUG)
@@ -35,13 +35,13 @@ class MagicTable(pl.DataFrame):
         self.api_urls = []
         self._driver = None
 
-    async def _get_driver(self) -> FallbackAsyncDriver:
+    async def _get_driver(self) -> HybridDriver:
         if self._driver is None:
             parsed_uri = urllib.parse.urlparse(self.neo4j_uri)
             scheme = parsed_uri.scheme
             if scheme in ["bolt", "neo4j", "bolt+s", "http", "https"]:
-                self._driver = FallbackAsyncGraphDatabase.driver(
-                    self.neo4j_uri, basic_auth(self.neo4j_user, self.neo4j_password)
+                self._driver = HybridDriver(
+                    self.neo4j_uri, self.neo4j_user, self.neo4j_password
                 )
                 await self._driver._load_cache()
             else:
