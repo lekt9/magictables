@@ -7,7 +7,7 @@ import dateparser
 import polars as pl
 import json
 from typing import Dict, Any, Optional, List, Tuple, Union
-from neo4j import Query, basic_auth
+from neo4j import Query
 import hashlib
 
 from magictables.utils import call_ai_model, flatten_nested_structure
@@ -929,65 +929,92 @@ result = df
         ]
 
     @classmethod
-    async def generate_query_params(
-        cls, url_template: str, query_description: str
-    ) -> "MagicTable":
+    async def gen(cls, query: str) -> "MagicTable":
         """
-        Generate a MagicTable with query parameters based on the URL template and query description.
+        Generate a MagicTable with data based on the provided natural language query.
 
-        :param url_template: The API URL template with placeholders.
-        :param query_description: A description of the query parameters and their ranges.
-        :return: A MagicTable with generated query parameters.
+        This method uses AI to generate Python code that creates a pandas DataFrame
+        based on the given query. It can handle various data generation scenarios,
+        including creating mock data or simulating data from APIs with pagination.
+
+        :param query: A string containing the natural language query for data generation.
+                    This can include descriptions of the desired data structure,
+                    API endpoints, pagination requirements, and data transformations.
+
+        :return: A MagicTable with generated data.
+
+        Usage examples:
+        1. Generate mock data:
+        query = "Create a dataset of 100 customers with name, age, and purchase amount"
+
+        2. Fetch data from an API with pagination:
+        query = "Fetch top 100 movies from TMDB API with title, release date, and rating.
+                Use this URL template: https://api.themoviedb.org/3/movie/top_rated?api_key={api_key}&page={page}"
+
+        3. Generate time series data:
+        query = "Generate daily stock prices for AAPL, GOOGL, and MSFT for Q1 2024"
+
+        Note: When using API-like queries, the method will generate query parameter pairs
+        based on the URL structure, focusing on pagination requirements.
         """
         prompt = f"""
-        Generate Python code to create a pandas DataFrame with query parameters for the following API:
+        Generate Python code to create a pandas DataFrame using iterators or generators based on the following natural language query:
 
-        URL Template: {url_template}
-        Query Description: {query_description}
+        "{query}"
 
-        The DataFrame should include a column named 'url' that contains the fully formatted URL for each API call,
-        and additional columns for any query parameters that should be passed separately.
+        The code should use pandas to efficiently create the DataFrame.
+        Only import and use pandas (as pd). Do not use any other libraries.
+
+        If the query mentions or implies the need for pagination or fetching data from an API,
+        generate query parameter pairs based on the URL template, focusing on pagination requirements.
 
         Examples:
 
-        1. URL Template: "https://api.example.com/weather/{{city}}/{{date}}"
-           Query Description: "Fetch weather data for New York, Los Angeles, and Chicago for the first week of January 2024."
-           Expected output:
-           ```python
-           import pandas as pd
+        1. Query: "Fetch top 100 movies from TMDB API with title, release date, and rating. Use this URL template: https://api.themoviedb.org/3/movie/top_rated?api_key={{api_key}}&page={{page}}"
+        Expected output:
+        {{
+            "code": 
+            import pandas as pd
 
-           cities = ['New York', 'Los Angeles', 'Chicago']
-           dates = pd.date_range(start='2024-01-01', end='2024-01-07')
-           df = pd.DataFrame([(f"https://api.example.com/weather/{{city}}/{{date.strftime('%Y-%m-%d')}}", city, date)
-                              for city in cities for date in dates],
-                             columns=['url', 'city', 'date'])
-           ```
+            def generate_query_params():
+                for page in range(1, 6):  # Assuming 20 movies per page, 5 pages for 100 movies
+                    yield {{
+                        'api_key': 'dummy_api_key',
+                        'page': page
+                    }}
 
-        2. URL Template: "https://api.example.com/stocks/{{symbol}}/history"
-           Query Description: "Fetch historical stock data for AAPL and GOOGL from 2023-01-01 to 2023-12-31, with monthly intervals. Include a 'period' parameter for daily, weekly, or monthly data."
-           Expected output:
-           ```python
-           import pandas as pd
+            df = pd.DataFrame(generate_query_params())
+        }}
 
-           symbols = ['AAPL', 'GOOGL']
-           dates = pd.date_range(start='2023-01-01', end='2023-12-31', freq='M')
-           periods = ['daily', 'weekly', 'monthly']
-           df = pd.DataFrame([(f"https://api.example.com/stocks/{{symbol}}/history", symbol, date, period)
-                              for symbol in symbols for date in dates for period in periods],
-                             columns=['url', 'symbol', 'date', 'period'])
-           ```
+        2. Query: "Fetch weather data for New York for the first week of January 2024, using a weather API with pagination. Use this URL template: https://api.example.com/weather?city={{city}}&date={{date}}&page={{page}}"
+        Expected output:
+        {{
+            "code": 
+            import pandas as pd
+
+            def generate_query_params():
+                city = 'New York'
+                date_range = pd.date_range(start='2024-01-01', end='2024-01-07')
+                for date in date_range:
+                    yield {{
+                        'city': city,
+                        'date': date.strftime('%Y-%m-%d'),
+                        'page': 1  # Assuming one page per day
+                    }}
+
+            df = pd.DataFrame(generate_query_params())
+        }}
 
         Your response should be in the following JSON format:
         {{
-            "code": "# Your Python code here to generate a pandas DataFrame"
+            "code": "Your Python code here"
         }}
         """
-
         response = await call_ai_model([], prompt)
         code = response.get("code", "")
 
         if not code:
-            raise ValueError("Failed to generate query parameters DataFrame")
+            raise ValueError("Failed to generate DataFrame code")
 
         # Execute the generated code
         local_vars = {"pd": pd}
@@ -1043,7 +1070,7 @@ result = df
     {json.dumps(column_info, indent=2)}
 
     Potential Matches:
-    {json.dumps(matches[:10], indent=2)}
+    {json.dumps(matches, indent=2)}
 
     Please provide the name of the column that best matches the placeholder in the API URL template.
     Your response should be in the following JSON format:
