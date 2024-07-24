@@ -106,7 +106,7 @@ async def call_ai_model(
         },
         {
             "role": "user",
-            "content": f"Input data: {json.dumps(input_data[10])[:20000]}\n\nPrompt: {prompt}\n\nGenerate a JSON response based on this input and prompt.",
+            "content": f"Input data: {json.dumps(input_data[:10])[:20000]}\n\nPrompt: {prompt}\n\nGenerate a JSON response based on this input and prompt.",
         },
     ]
     try:
