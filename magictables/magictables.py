@@ -1,3 +1,4 @@
+import random
 from magictables.fallback_driver import HybridDriver
 
 import asyncio
@@ -611,107 +612,111 @@ Your response should be in the following JSON format:
         else:
             prompt = f"""Given the following pandas DataFrame structure and the query, generate Python code to process or analyze the data using pandas.
 
-What we are trying to achieve: {natural_query}
-Find popular movies with a vote average greater than 7.5 and list their cast members who are older than 40
+    What we are trying to achieve: {natural_query}
+    Find popular movies with a vote average greater than 7.5 and list their cast members who are older than 40
 
-Current DataFrame you must only work with:
-DataFrame Structure:
-Columns: {pandas_df.columns.tolist()}
-Shape: {pandas_df.shape}
-Data Types:
-{pandas_df.dtypes}
+    Current DataFrame you must only work with:
+    DataFrame Structure:
+    Columns: {pandas_df.columns.tolist()}
+    Shape: {pandas_df.shape}
+    Data Types:
+    {pandas_df.dtypes}
 
-Sample Data (first 10 rows):
-{pandas_df.head(10).to_string()}
+    Sample Data (first 10 rows):
+    {pandas_df.head(10).to_string()}
 
-Please provide Python code to process this DataFrame, adhering to the following guidelines:
-1. Only use columns that exist in the DataFrame. Do not reference any columns not listed above.
-2. Ensure all operations are efficient and use pandas vectorized operations where possible.
-3. Handle potential data type issues, especially for date/time columns or numeric calculations.
-4. The code should return a pandas DataFrame as the result.
-5. Do not include any print statements or comments in the code.
-6. The input DataFrame is named 'df'.
-7. If the DataFrame is empty or missing required columns, create a sample DataFrame with the necessary columns.
-8. When working with dates, always use pd.to_datetime() for conversion and handle potential errors.
-9. For age calculations, use a method that works across different pandas versions, avoiding timedelta conversions to years.
-10. You MUST only use pandas and no other libraries.
+    Please provide Python code to process this DataFrame, adhering to the following guidelines:
+    1. Only use columns that exist in the DataFrame. Do not reference any columns not listed above.
+    2. Ensure all operations are efficient and use pandas vectorized operations where possible.
+    3. Handle potential data type issues, especially for date/time columns or numeric calculations.
+    4. The code should return a pandas DataFrame as the result.
+    5. Do not include any print statements or comments in the code.
+    6. The input DataFrame is named 'df'.
+    7. If the DataFrame is empty or missing required columns, create a sample DataFrame with the necessary columns.
+    8. When working with dates, always use pd.to_datetime() for conversion and handle potential errors.
+    9. For age calculations, use a method that works across different pandas versions, avoiding timedelta conversions to years.
+    10. You MUST only use pandas and no other libraries.
 
-Your response should be in the following JSON format:
-{{"pandas_code": "# Ensure all date columns are in datetime format
-date_columns = df.select_dtypes(include=['object']).columns[df.select_dtypes(include=['object']).apply(lambda x: pd.to_datetime(x, errors='coerce').notnull().all())]
-for col in date_columns:
-    df[col] = pd.to_datetime(df[col], errors='coerce')
+    Your response should be in the following JSON format:
+    date_columns = df.select_dtypes(include=['object']).columns[df.select_dtypes(include=['object']).apply(lambda x: pd.to_datetime(x, errors='coerce').notnull().all())]
+    for col in date_columns:
+        df[col] = pd.to_datetime(df[col], errors='coerce')
 
-# Handle missing values
-df = df.fillna({{
-    col: df[col].mean() if pd.api.types.is_numeric_dtype(df[col]) else df[col].mode()[0]
-    for col in df.columns
-}})
+    # Handle missing values
+    df = df.fillna({{
+        col: df[col].mean() if pd.api.types.is_numeric_dtype(df[col]) else df[col].mode()[0]
+        for col in df.columns
+    }})
 
-# Create age column if 'birthdate' exists
-if 'birthdate' in df.columns:
-    df['age'] = (pd.Timestamp.now() - df['birthdate']).astype('<m8[Y]').astype(int)
+    # Create age column if 'birthdate' exists
+    if 'birthdate' in df.columns:
+        df['age'] = (pd.Timestamp.now() - df['birthdate']).astype('<m8[Y]').astype(int)
 
-# Perform string operations
-text_columns = df.select_dtypes(include=['object']).columns
-for col in text_columns:
-    df[col] = df[col].str.strip().str.lower()
+    # Perform string operations
+    text_columns = df.select_dtypes(include=['object']).columns
+    for col in text_columns:
+        df[col] = df[col].str.strip().str.lower()
 
-# One-hot encode categorical variables
-categorical_columns = df.select_dtypes(include=['object']).columns
-df = pd.get_dummies(df, columns=categorical_columns, drop_first=True)
+    # One-hot encode categorical variables
+    categorical_columns = df.select_dtypes(include=['object']).columns
+    df = pd.get_dummies(df, columns=categorical_columns, drop_first=True)
 
-# Scale numerical columns
-from sklearn.preprocessing import StandardScaler
-scaler = StandardScaler()
-numeric_columns = df.select_dtypes(include=['int64', 'float64']).columns
-df[numeric_columns] = scaler.fit_transform(df[numeric_columns])
+    # Scale numerical columns
+    from sklearn.preprocessing import StandardScaler
+    scaler = StandardScaler()
+    numeric_columns = df.select_dtypes(include=['int64', 'float64']).columns
+    df[numeric_columns] = scaler.fit_transform(df[numeric_columns])
 
-# Perform aggregations
-if 'category' in df.columns and 'value' in df.columns:
-    df['total_value'] = df.groupby('category')['value'].transform('sum')
-    df['percentage'] = df['value'] / df['total_value'] * 100
+    # Perform aggregations
+    if 'category' in df.columns and 'value' in df.columns:
+        df['total_value'] = df.groupby('category')['value'].transform('sum')
+        df['percentage'] = df['value'] / df['total_value'] * 100
 
-# Filter data based on conditions
-if 'age' in df.columns:
-    df = df[df['age'] >= 18]
+    # Filter data based on conditions
+    if 'age' in df.columns:
+        df = df[df['age'] >= 18]
 
-# Sort the dataframe
-if 'date' in df.columns:
-    df = df.sort_values('date', ascending=False)
+    # Sort the dataframe
+    if 'date' in df.columns:
+        df = df.sort_values('date', ascending=False)
 
-# Rename columns for clarity
-df = df.rename(columns={{
-    'col1': 'feature_1',
-    'col2': 'feature_2'
-}})
+    # Rename columns for clarity
+    df = df.rename(columns={{
+        'col1': 'feature_1',
+        'col2': 'feature_2'
+    }})
 
-# Create a new calculated column
-if 'price' in df.columns and 'quantity' in df.columns:
-    df['total_revenue'] = df['price'] * df['quantity']
+    # Create a new calculated column
+    if 'price' in df.columns and 'quantity' in df.columns:
+        df['total_revenue'] = df['price'] * df['quantity']
 
-# Perform a rolling average if time-series data is present
-if 'date' in df.columns and 'value' in df.columns:
-    df = df.sort_values('date')
-    df['rolling_avg'] = df['value'].rolling(window=7).mean()
+    # Perform a rolling average if time-series data is present
+    if 'date' in df.columns and 'value' in df.columns:
+        df = df.sort_values('date')
+        df['rolling_avg'] = df['value'].rolling(window=7).mean()
 
-# Drop unnecessary columns
-columns_to_drop = ['temp_col1', 'temp_col2']
-df = df.drop(columns=columns_to_drop, errors='ignore')
+    # Drop unnecessary columns
+    columns_to_drop = ['temp_col1', 'temp_col2']
+    df = df.drop(columns=columns_to_drop, errors='ignore')
 
-# Reset index if needed
-df = df.reset_index(drop=True)
+    # Reset index if needed
+    df = df.reset_index(drop=True)
 
-result = df
-"}}
-"""
+    result = df
+    """
             response = await call_ai_model(
                 [],
                 prompt,
                 model="openrouter/anthropic/claude-3.5-sonnet:beta",
             )
 
-            pandas_code = response.get("pandas_code", "df")
+            if isinstance(response, str):
+                logger.error(
+                    f"Failed to generate pandas code. AI model response: {response}"
+                )
+                return pandas_df, None
+
+            pandas_code = response
 
             logger.debug(f"Generated pandas code: {pandas_code}")
 
@@ -816,102 +821,155 @@ result = df
         api_url: Union[str, Dict[str, str]],
         key: Optional[str] = None,
         params: Optional[Dict[str, Any]] = None,
-        expand: bool = False,
+        # expand: bool = False,
+        # groupby: bool = True,  # New parameter to control groupby operation
     ) -> "MagicTable":
+        """
+        Chain data by enriching it with additional information from an API.
+
+        This method allows you to enrich the current DataFrame with data fetched from an API.
+        It supports grouping by the parameters used in the API calls and joining the results
+        with the original DataFrame. This is useful for scenarios where you need to augment
+        your data with additional information from external sources.
+
+        Parameters:
+        - api_url (Union[str, Dict[str, str]]): The API URL or a dictionary mapping column names to API URLs.
+        If a string is provided, the method will identify key columns to use for the API calls.
+        - key (Optional[str]): An optional key to use for the API calls. If not provided, the method will
+        attempt to identify the key columns automatically.
+        - params (Optional[Dict[str, Any]]): Additional parameters to pass to the API calls.
+        - expand (bool): Whether to expand the results. Default is False.
+        - groupby (bool): Whether to group by the parameters used in the API calls before joining.
+        Default is True. If set to False, the DataFrame will be flattened after the join.
+
+        Returns:
+        - MagicTable: A new MagicTable instance with the enriched data.
+
+        Usage:
+        ```python
+        # Example usage with grouping by parameters
+        match_results_url = "https://api.example.com/match_results?startDate={startDate}&endDate={endDate}"
+        match_result_dates = await MagicTable.gen(f"Get me every week from 2022-01-01 to {datetime.today().isoformat()[:10]} in {match_results_url}")
+        match_results = await match_result_dates.chain(match_results_url, groupby=True)
+
+        # Example usage without grouping by parameters
+        match_results = await match_result_dates.chain(match_results_url, groupby=False)
+        ```
+
+        This method handles cases where the URL parameters are not present in the API response,
+        making the chaining process more robust. It also ensures that the original data is preserved
+        even if no join can be performed.
+        """
         if isinstance(api_url, str):
-            if key is None:
-                key = await self._identify_key_column(api_url)
-            api_url_dict = {key: api_url}
+            key_columns = await self._identify_key_columns(api_url)
+            api_url_dict = {col: api_url for col in key_columns}
         else:
             api_url_dict = api_url
 
-            async def process_row(row: Dict[str, Any]) -> List[Dict[str, Any]]:
-                results = []
-                for col, url_template in api_url_dict.items():
-                    key_value = row[col]
-                    url = url_template.format(**{col: key_value})
+        async def process_row(
+            row: Dict[str, Any], key: str, key_value: Any
+        ) -> List[Dict[str, Any]]:
+            url_template = next(iter(api_url_dict.values()))  # Get the URL template
+            url_params = {col: row[col] for col in api_url_dict.keys() if col in row}
+            url = url_template.format(**url_params)
 
-                    max_retries = 5
-                    base_delay = 1  # Start with 1 second delay
+            max_retries = 5
+            base_delay = 1  # Start with 1 second delay
 
-                    for attempt in range(max_retries):
-                        try:
-                            async with aiohttp.ClientSession() as session:
-                                async with session.get(url, params=params) as response:
-                                    if response.status == 429:  # Too Many Requests
-                                        raise aiohttp.ClientResponseError(
-                                            response.request_info,
-                                            response.history,
-                                            status=429,
-                                        )
-                                    response.raise_for_status()  # Raise an exception for non-200 status codes
-                                    data = await response.json()
-
-                            flattened_data = flatten_nested_structure(data)
-                            if expand and isinstance(flattened_data, list):
-                                for item in flattened_data:
-                                    item[key] = key_value
-                                    results.append(item)
-                            else:
-                                results = flattened_data if flattened_data else [{}]
-                                for item in results:
-                                    item[key] = key_value
-                            break  # Success, exit the retry loop
-
-                        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-                            if attempt == max_retries - 1:  # Last attempt
-                                logger.error(
-                                    f"Error fetching data for {col} after {max_retries} attempts: {str(e)}"
+            for attempt in range(max_retries):
+                try:
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(url, params=params) as response:
+                            if response.status == 429:  # Too Many Requests
+                                raise aiohttp.ClientResponseError(
+                                    response.request_info,
+                                    response.history,
+                                    status=429,
                                 )
-                                results.append({key: key_value})
-                            else:
-                                delay = (2**attempt * base_delay) + (
-                                    random.randint(0, 1000) / 1000
-                                )
-                                logger.warning(
-                                    f"Attempt {attempt + 1} failed for {col}. Retrying in {delay:.2f} seconds..."
-                                )
-                                await asyncio.sleep(delay)
+                            response.raise_for_status()  # Raise an exception for non-200 status codes
+                            data = await response.json()
+                            data = flatten_nested_structure(data)
+                            logger.debug(data)
 
-                return results
+                    return data  # Simply return the data without processing
+
+                except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                    logger.error(f"Error fetching data {e}")
+
+                    if attempt == max_retries - 1:  # Last attempt
+                        logger.error(f"Last attempt failed")
+                        return [{key: key_value}]
+                    else:
+                        delay = (2**attempt * base_delay) + (
+                            random.randint(0, 1000) / 1000
+                        )
+                        logger.warning(
+                            f"Attempt {attempt + 1} failed. Retrying in {delay:.2f} seconds..."
+                        )
+                        await asyncio.sleep(delay)
+
+            return [{key: key_value}]  # Return a default value if all attempts fail
 
         async def process_all_rows():
-            tasks = [process_row(row) for row in self.to_dicts()]
-            return await asyncio.gather(*tasks)
-
-        try:
-            results = await process_all_rows()
-            flattened_results = [item for sublist in results for item in sublist]
-
-            # Create a new DataFrame with the flattened API results
-            api_df = pl.DataFrame(flattened_results)
-
-            # Get the set of existing column names
-            existing_columns = set(self.columns)
-
-            # Keep only new columns and the key column from api_df
-            columns_to_keep = [
-                col
-                for col in api_df.columns
-                if col not in existing_columns or col == key
+            tasks = [
+                process_row(
+                    row,
+                    next(iter(api_url_dict.keys())),
+                    row.get(next(iter(api_url_dict.keys()))),
+                )
+                for row in self.to_dicts()
             ]
-            api_df = api_df.select(columns_to_keep)
+            results = await asyncio.gather(*tasks)
+            return [
+                item
+                for sublist in results
+                for item in (sublist if isinstance(sublist, list) else [sublist])
+            ]
 
-            # Ensure the key column exists in both DataFrames
-            if key not in self.columns or key not in api_df.columns:
-                raise ValueError(f"Key column '{key}' not found in both DataFrames")
+        results = await process_all_rows()
+        logger.debug(len(results))
+        if results is None:
+            raise Exception("None returned!")
 
-            # Join the original DataFrame with the API results
-            if expand:
-                joined_df = self.join(api_df, on=key, how="left")
-            else:
-                joined_df = self.join(api_df, on=key, how="left")
+        logger.debug(results)
+        # flattened_results = flatten_nested_structure(results)
+        # Create a new DataFrame with the flattened API results
+        api_df = pl.DataFrame(results)
 
-            return MagicTable(joined_df)
+        # Get the set of existing column names
+        existing_columns = set(self.columns)
 
-        except Exception as e:
-            logger.error(f"Error during chaining: {str(e)}")
-            return self  # Return the original DataFrame if chaining fails
+        logger.debug(f"Existing columns: {existing_columns}")
+        logger.debug(f"API DataFrame columns: {api_df.columns}")
+
+        # Keep only new columns and the key columns from api_df
+        columns_to_keep = [
+            col
+            for col in api_df.columns
+            if col not in existing_columns or col in api_url_dict.keys()
+        ]
+        api_df = api_df.select(columns_to_keep)
+
+        logger.debug(f"Columns to keep: {columns_to_keep}")
+        logger.debug(f"API DataFrame columns after selection: {api_df.columns}")
+
+        # Identify join keys that exist in both DataFrames
+        join_keys = [
+            key
+            for key in api_url_dict.keys()
+            if key in self.columns and key in api_df.columns
+        ]
+
+        logger.debug(f"Join keys: {join_keys}")
+
+        if not join_keys:
+            logger.warning(
+                "No common join keys found. Query parameters used in the API call should be added as new columns."  # TODO figure this out
+            )
+
+            return MagicTable(api_df)
+        else:
+            return MagicTable(self.join(api_df, on=join_keys, how="left"))
 
     @staticmethod
     def _is_numeric_dtype(dtype):
@@ -972,49 +1030,43 @@ result = df
 
         1. Query: "Fetch top 100 movies from TMDB API with title, release date, and rating. Use this URL template: https://api.themoviedb.org/3/movie/top_rated?api_key={{api_key}}&page={{page}}"
         Expected output:
-        {{
-            "code": 
-            import pandas as pd
 
-            def generate_query_params():
-                for page in range(1, 6):  # Assuming 20 movies per page, 5 pages for 100 movies
-                    yield {{
-                        'api_key': 'dummy_api_key',
-                        'page': page
-                    }}
+        import pandas as pd
 
-            df = pd.DataFrame(generate_query_params())
-        }}
+        def generate_query_params():
+            for page in range(1, 6):  # Assuming 20 movies per page, 5 pages for 100 movies
+                yield {{
+                    'api_key': 'dummy_api_key',
+                    'page': page
+                }}
+
+        df = pd.DataFrame(generate_query_params())
 
         2. Query: "Fetch weather data for New York for the first week of January 2024, using a weather API with pagination. Use this URL template: https://api.example.com/weather?city={{city}}&date={{date}}&page={{page}}"
         Expected output:
-        {{
-            "code": 
-            import pandas as pd
 
-            def generate_query_params():
-                city = 'New York'
-                date_range = pd.date_range(start='2024-01-01', end='2024-01-07')
-                for date in date_range:
-                    yield {{
-                        'city': city,
-                        'date': date.strftime('%Y-%m-%d'),
-                        'page': 1  # Assuming one page per day
-                    }}
+        import pandas as pd
 
-            df = pd.DataFrame(generate_query_params())
-        }}
+        def generate_query_params():
+            city = 'New York'
+            date_range = pd.date_range(start='2024-01-01', end='2024-01-07')
+            for date in date_range:
+                yield {{
+                    'city': city,
+                    'date': date.strftime('%Y-%m-%d'),
+                    'page': 1  # Assuming one page per day
+                }}
 
-        Your response should be in the following JSON format:
-        {{
-            "code": "Your Python code here"
-        }}
+        df = pd.DataFrame(generate_query_params())
+
+        Your response should be the Python code directly, without any JSON formatting.
         """
-        response = await call_ai_model([], prompt)
-        code = response.get("code", "")
+        code = await call_ai_model([], prompt, return_json=False)
 
         if not code:
             raise ValueError("Failed to generate DataFrame code")
+
+        print("code", code)
 
         # Execute the generated code
         local_vars = {"pd": pd}
@@ -1026,12 +1078,12 @@ result = df
         else:
             raise ValueError("Generated code did not produce a valid DataFrame")
 
-    async def _identify_key_column(self, api_url_template: str) -> str:
+    async def _identify_key_columns(self, api_url_template: str) -> List[str]:
         """
-        Identify the most suitable key column for the given API URL template.
+        Identify the most suitable key columns for the given API URL template.
 
         :param api_url_template: The API URL template to analyze.
-        :return: The name of the identified key column.
+        :return: A list of names of the identified key columns.
         """
         # Extract placeholders from the API URL template
         placeholders = [p.strip("{}") for p in api_url_template.split("{") if "}" in p]
@@ -1053,14 +1105,14 @@ result = df
                 ):
                     matches[placeholder] = matches.get(placeholder, []) + [col]
 
-        # If we have a single match for a placeholder, return it
-        if len(matches) == 1 and len(next(iter(matches.values()))) == 1:
-            return next(iter(matches.values()))[0]
+        # If we have a single match for each placeholder, return them
+        if all(len(cols) == 1 for cols in matches.values()):
+            return [next(iter(cols)) for cols in matches.values()]
 
-        # If we have multiple matches or no matches, use AI to decide
+        # If we have multiple matches or no matches for any placeholder, use AI to decide
         if not matches or any(len(cols) > 1 for cols in matches.values()):
             prompt = f"""Given the following API URL template and the current DataFrame structure, 
-    identify the most suitable column to use as a key for chaining API calls.
+    identify the most suitable columns to use as keys for chaining API calls.
 
     API URL Template: {api_url_template}
 
@@ -1072,24 +1124,90 @@ result = df
     Potential Matches:
     {json.dumps(matches, indent=2)}
 
-    Please provide the name of the column that best matches the placeholder in the API URL template.
+    Please provide the names of the columns that best match the placeholders in the API URL template.
     Your response should be in the following JSON format:
-    {{"column_name": "example_column"}}
-    Replace "example_column" with the actual column name you identify as the best match.
+    {{"column_names": ["example_column1", "example_column2"]}}
+    Replace the example column names with the actual column names you identify as the best matches.
     """
 
             response = await call_ai_model([column_info], prompt)
-            key_column = response.get("column_name")
+            key_columns = response.get("column_names", [])
 
-            if not key_column or key_column not in self.columns:
+            if not key_columns or any(col not in self.columns for col in key_columns):
                 raise ValueError(
-                    f"Unable to identify a suitable key column for the given API URL template: {api_url_template}"
+                    f"Unable to identify suitable key columns for the given API URL template: {api_url_template}"
                 )
 
-            return key_column
+            return key_columns
 
-        # If we have a single match for each placeholder, return the first one
-        return next(iter(matches.values()))[0]
+        # If we have a single match for some placeholders and multiple for others,
+        # return the single matches and use the first match for the others
+        return [next(iter(cols)) for cols in matches.values()]
+
+    # async def _identify_key_column(self, api_url_template: str) -> str:
+    #     """
+    #     Identify the most suitable key column for the given API URL template.
+
+    #     :param api_url_template: The API URL template to analyze.
+    #     :return: The name of the identified key column.
+    #     """
+    #     # Extract placeholders from the API URL template
+    #     placeholders = [p.strip("{}") for p in api_url_template.split("{") if "}" in p]
+
+    #     # Get column information
+    #     column_info = {
+    #         col: {"dtype": str(dtype), "sample": self[col].head(5).to_list()}
+    #         for col, dtype in zip(self.columns, self.dtypes)
+    #     }
+
+    #     # Find matching columns for each placeholder
+    #     matches = {}
+    #     for placeholder in placeholders:
+    #         for col, info in column_info.items():
+    #             # Check if the column name is similar to the placeholder
+    #             if (
+    #                 placeholder.lower() in col.lower()
+    #                 or col.lower() in placeholder.lower()
+    #             ):
+    #                 matches[placeholder] = matches.get(placeholder, []) + [col]
+
+    #     # If we have a single match for a placeholder, return it
+    #     if len(matches) == 1 and len(next(iter(matches.values()))) == 1:
+    #         return next(iter(matches.values()))[0]
+
+    #     # If we have multiple matches or no matches, use AI to decide
+    #     if not matches or any(len(cols) > 1 for cols in matches.values()):
+    #         prompt = f"""Given the following API URL template and the current DataFrame structure,
+    # identify the most suitable column to use as a key for chaining API calls.
+
+    # API URL Template: {api_url_template}
+
+    # Placeholders: {placeholders}
+
+    # DataFrame Columns and Types:
+    # {json.dumps(column_info, indent=2)}
+
+    # Potential Matches:
+    # {json.dumps(matches, indent=2)}
+
+    # Please provide the name of the column that best matches the placeholder in the API URL template.
+    # Your response should be in the following JSON format:
+    # {{"column_name": "example_column"}}
+    # Replace "example_column" with the actual column name you identify as the best match.
+    # """
+
+    #         response = await call_ai_model([column_info], prompt)
+    #         key_column = response.get("column_name")
+
+    #         if not key_column or key_column not in self.columns:
+    #             raise ValueError(
+    #                 f"Unable to identify a suitable key column for the given API URL template: {api_url_template}"
+    #             )
+
+    #         return key_column
+
+    #     # If we have a single match for each placeholder, return the first one
+    #     return next(iter(matches.values()))[0]
 
     async def _store_in_neo4j(
         self, label: str, api_url: str, description: str, embedding: List[float]

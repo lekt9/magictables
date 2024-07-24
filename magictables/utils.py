@@ -1,7 +1,6 @@
 # utils.py
 import json
 import os
-import re
 from typing import Any, Dict, List
 import aiohttp
 from dotenv import load_dotenv
@@ -69,8 +68,11 @@ def flatten_nested_structure(nested_structure):
 
 
 async def call_ai_model(
-    input_data: List[Dict[str, Any]], prompt: str, model: str = None
-) -> Dict[str, Any]:
+    input_data: List[Dict[str, Any]],
+    prompt: str,
+    model: str = None,
+    return_json=True,
+) -> Dict[str, Any] | str:
     api_key = None
     default_model = None
 
@@ -99,48 +101,44 @@ async def call_ai_model(
         "Content-Type": "application/json",
     }
 
+    if return_json:
+        system_content = "You are a JSON generator. Generate JSON based on the given input data and prompt. Wrap it in a ```json code block, and NEVER send anything else"
+    else:
+        system_content = "You are an AI assistant. Respond to the given input data and prompt with natural language. Do not use JSON formatting."
+
     messages = [
         {
             "role": "system",
-            "content": "You are a JSON generator. Generate JSON based on the given input data and prompt. Wrap it in a ```json code block, and NEVER send anything else",
+            "content": system_content,
         },
         {
             "role": "user",
-            "content": f"Input data: {json.dumps(input_data[:10])[:20000]}\n\nPrompt: {prompt}\n\nGenerate a JSON response based on this input and prompt.",
+            "content": f"Input data: {json.dumps(input_data[:10])[:20000]}\n\nPrompt: {prompt}\n\nGenerate a {'JSON' if return_json else ''} response based on this input and prompt.",
         },
     ]
+
     try:
-        # print("input", messages)
         response = await acompletion(model=model_to_use, messages=messages)
         response_content = response.choices[0].message.content
-        if "```json" in response_content:
-            json_str = response_content.replace("```json", "```").split("```")[1]
-        else:
-            json_str = response_content
-        # print("str", json_str)
 
-        # Use json.loads() with a custom parser to handle newlines
-        result = json.loads(json_str, parse_constant=lambda x: x.strip())
-        # print("output", result)
-        logging.debug(f"Parsed JSON result: {result}")
-        return result
-    except (KeyError, json.JSONDecodeError) as e:
-        # If JSON parsing fails, try to extract the pandas_code directly
-        try:
-            pandas_code_match = re.search(
-                r'"pandas_code":\s*"(.*?)"(?=\s*})', json_str, re.DOTALL
-            )
-            if pandas_code_match:
-                pandas_code = pandas_code_match.group(1)
-                # Unescape newlines and quotes
-                pandas_code = pandas_code.replace("\\n", "\n").replace('\\"', '"')
-                return {"pandas_code": pandas_code}
+        if return_json:
+            if "```json" in response_content:
+                json_str = response_content.replace("```json", "```").split("```")[1]
             else:
-                raise ValueError("Could not extract pandas_code")
-        except Exception as inner_e:
-            error_message = f"Failed to parse API response: {str(e)}. Additional error: {str(inner_e)}"
-            logging.error(error_message)
-            raise Exception(error_message)
+                json_str = response_content
+
+            try:
+                result = json.loads(json_str, parse_constant=lambda x: x.strip())
+                logging.debug(f"Parsed JSON result: {result}")
+                return result
+            except json.JSONDecodeError as e:
+                logging.warning(
+                    f"Failed to parse JSON. Returning raw response. Error: {str(e)}"
+                )
+                return response_content
+        else:
+            return response_content.strip()
+
     except aiohttp.ClientError as e:
         error_message = f"API request failed: {str(e)}"
         logging.error(error_message)
