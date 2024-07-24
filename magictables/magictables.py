@@ -158,48 +158,79 @@ class MagicTable(pl.DataFrame):
             standardized_row = self._standardize_data_types(row)
             node_id = self._generate_node_id(sanitized_label, standardized_row)
             combined_text = f"{api_description} {json.dumps(standardized_row)}"
-            embedding = await self._generate_embedding(combined_text)
             rows.append(
                 {
                     "node_id": node_id,
                     "row": standardized_row,
-                    "embedding": embedding,
+                    "combined_text": combined_text,
                 }
             )
 
-        # Construct a single Cypher query for bulk insert
-        query = Query(
-            f"""
-            MERGE (a:APIEndpoint {{url: $api_url}})
-            SET a.description = $api_description
-            WITH a
-            UNWIND $rows AS row
-            MERGE (d:{sanitized_label} {{id: row.node_id}})
-            SET d += row.row,
-                d.embedding = row.embedding
-            MERGE (d)-[:SOURCED_FROM]->(a)
-            WITH d, a
-            
-            // Create TransformedData node if transform was applied
-            {f'''
-            MERGE (q:QueryNode {{key: $query_key}})
-            SET q.natural_query = $transform_query
-            MERGE (t:TransformedData {{id: apoc.create.uuid()}})
-            SET t += d
-            MERGE (q)-[r:TRANSFORMED_BY]->(t)
-            SET r.pandas_code = $pandas_code
-            ''' if transform_query and pandas_code else ''}
-            RETURN count(d) as nodes_created
-            """  # type: ignore
+        # Generate embeddings concurrently
+        embeddings = await asyncio.gather(
+            *[self._generate_embedding(row["combined_text"]) for row in rows]
         )
 
+        # Add embeddings to rows
+        for row, embedding in zip(rows, embeddings):
+            row["embedding"] = embedding
+
+        # Check if rows already exist
         driver = await self._get_driver()
         async with driver.session() as session:
+            existing_node_ids = set()
+            for row in rows:
+                result = await session.run(
+                    f"""
+                    MATCH (d:{sanitized_label} {{id: $node_id}})
+                    RETURN d.id
+                    """,
+                    node_id=row["node_id"],
+                )
+                record = await result.single()
+                if record:
+                    existing_node_ids.add(row["node_id"])
+
+            # Filter out existing rows
+            rows_to_store = [
+                row for row in rows if row["node_id"] not in existing_node_ids
+            ]
+
+            if not rows_to_store:
+                logger.info("No new rows to store in Neo4j")
+                return
+
+            # Construct a single Cypher query for bulk insert
+            query = Query(
+                f"""
+                MERGE (a:APIEndpoint {{url: $api_url}})
+                SET a.description = $api_description
+                WITH a
+                UNWIND $rows AS row
+                MERGE (d:{sanitized_label} {{id: row.node_id}})
+                SET d += row.row,
+                    d.embedding = row.embedding
+                MERGE (d)-[:SOURCED_FROM]->(a)
+                WITH d, a
+                
+                // Create TransformedData node if transform was applied
+                {f'''
+                MERGE (q:QueryNode {{key: $query_key}})
+                SET q.natural_query = $transform_query
+                MERGE (t:TransformedData {{id: apoc.create.uuid()}})
+                SET t += d
+                MERGE (q)-[r:TRANSFORMED_BY]->(t)
+                SET r.pandas_code = $pandas_code
+                ''' if transform_query and pandas_code else ''}
+                RETURN count(d) as nodes_created
+                """  # type: ignore
+            )
+
             result = await session.run(
                 query,
                 api_url=api_url,
                 api_description=api_description,
-                rows=rows,
+                rows=rows_to_store,
                 query_key=query_key,
                 transform_query=transform_query,
                 pandas_code=pandas_code,
@@ -292,6 +323,7 @@ Your response should be in the following JSON format:
                 "https://api.jina.ai/v1/embeddings", headers=headers, json=data
             ) as response:
                 result = await response.json()
+                logging.debug("Got embedding")
 
                 return result["data"][0]["embedding"]
 
@@ -851,7 +883,7 @@ result = df
             return MagicTable(joined_df)
 
         except Exception as e:
-            # print(f"Error during chaining: {str(e)}")
+            logger.error(f"Error during chaining: {str(e)}")
             return self  # Return the original DataFrame if chaining fails
 
     @staticmethod
@@ -913,7 +945,7 @@ result = df
     {json.dumps(column_info, indent=2)}
 
     Potential Matches:
-    {json.dumps(matches, indent=2)}
+    {json.dumps(matches[:10], indent=2)}
 
     Please provide the name of the column that best matches the placeholder in the API URL template.
     Your response should be in the following JSON format:
@@ -952,24 +984,70 @@ result = df
                 embedding=embedding,
             )
 
-            for row in self.to_dicts():
-                standardized_row = self._standardize_data_types(row)
-                node_id = self._generate_node_id(sanitized_label, standardized_row)
-                query = Query(
+            # Standardize data types for the entire DataFrame
+            standardized_df = self._standardize_data_types_polars(self)
+
+            # Generate node IDs for the entire DataFrame
+            node_ids = self._generate_node_ids_polars(standardized_df, sanitized_label)
+
+            # Combine standardized data and node IDs
+            combined_df = standardized_df.with_columns([node_ids.alias("node_id")])
+
+            # Construct Cypher queries for all rows
+            queries = [
+                Query(
                     f"""
                     MERGE (d:{sanitized_label} {{id: $node_id}})
                     SET d += $row
                     WITH d
                     MATCH (a:APIEndpoint {{url: $api_url}})
                     MERGE (d)-[:SOURCED_FROM]->(a)
-                    """  # type: ignore
+                    """
                 )
-                await session.run(
-                    query,
-                    node_id=node_id,
-                    row=standardized_row,
-                    api_url=api_url,
-                )
+                for _ in range(len(combined_df))
+            ]
+
+            # Execute Cypher queries in bulk
+            await asyncio.gather(
+                *[
+                    session.run(
+                        query,
+                        node_id=row["node_id"],
+                        row={k: v for k, v in row.items() if k != "node_id"},
+                        api_url=api_url,
+                    )
+                    for query, row in zip(queries, combined_df.to_dicts())
+                ]
+            )
+
+    def _standardize_data_types_polars(self, df: pl.DataFrame) -> pl.DataFrame:
+        return df.select(
+            [
+                pl.when(pl.col(col).is_numeric())
+                .then(pl.col(col).cast(pl.Float64))
+                .when(pl.col(col).str.strptime(pl.Datetime, strict=False).is_not_null())
+                .then(pl.col(col).str.strptime(pl.Datetime, strict=False))
+                .otherwise(pl.col(col).cast(pl.Utf8))
+                .alias(col)
+                for col in df.columns
+            ]
+        )
+
+    def _generate_node_ids_polars(self, df: pl.DataFrame, label: str) -> pl.Series:
+        # Combine all columns into a single string
+        combined = pl.concat_str(
+            [pl.lit(label)] + [pl.col(col).cast(pl.Utf8) for col in df.columns]
+        )
+
+        # Generate MD5 hash
+        return combined.map_elements(lambda x: hashlib.md5(x.encode()).hexdigest())
+
+    def _sanitize_label(self, label: str) -> str:
+        # Ensure the label starts with a letter
+        if not label[0].isalpha():
+            label = "N" + label
+        # Replace any non-alphanumeric characters with underscores
+        return "".join(c if c.isalnum() else "_" for c in label)
 
     async def _store_api_metadata(
         self, api_url: str, sample_data: List[Dict[str, Any]]
