@@ -7,22 +7,28 @@ class NotSoMagicTable(MagicTable):
         if isinstance(data, pd.DataFrame):
             super().__init__(data)
         elif isinstance(data, MagicTable):
-            self.__dict__ = data.__dict__.copy()
+            super().__init__(data.to_pandas())
+            self.__dict__.update(data.__dict__)
         else:
             raise ValueError("Input must be a pandas DataFrame or a MagicTable")
 
     def __getattribute__(self, name):
-        attr = super().__getattribute__(name)
-        if callable(attr):
+        try:
+            attr = super().__getattribute__(name)
+            if callable(attr):
 
-            def wrapper(*args, **kwargs):
-                result = attr(*args, **kwargs)
-                if isinstance(result, MagicTable):
-                    return NotSoMagicTable(result).to_pandas()
-                return result
+                def wrapper(*args, **kwargs):
+                    result = attr(*args, **kwargs)
+                    if isinstance(result, MagicTable):
+                        return NotSoMagicTable(result).to_pandas()
+                    return result
 
-            return wrapper
-        return attr
+                return wrapper
+            return attr
+        except AttributeError:
+            if name == "_driver":
+                return None
+            raise
 
     @classmethod
     async def from_api(cls, *args, **kwargs):
