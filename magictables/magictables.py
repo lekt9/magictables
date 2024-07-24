@@ -83,12 +83,7 @@ class MagicTable(pl.DataFrame):
         return self
 
     def __del__(self):
-        if self._driver:
-            logging.warning(
-                "MagicTable instance is being destroyed without properly closing the driver. "
-                "This may lead to resource leaks. Please use 'await magic_table.close()' "
-                "to properly close the driver."
-            )
+        pass
 
     @classmethod
     async def from_polars(cls, df: pl.DataFrame, label: str) -> "MagicTable":

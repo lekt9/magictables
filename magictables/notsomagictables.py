@@ -1,56 +1,58 @@
 import pandas as pd
-from magictables import MagicTable
+import polars as pl
+from magictables.magictables import MagicTable
+import asyncio
 
 
-class NotSoMagicTable(MagicTable):
+class NotSoMagicTable(pd.DataFrame):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
     @classmethod
     async def from_api(cls, *args, **kwargs):
-        magic_table = await super().from_api(*args, **kwargs)
+        magic_table = await MagicTable.from_api(*args, **kwargs)
         return cls(magic_table.to_pandas())
 
-    @classmethod
-    async def from_polars(cls, df, label: str):
-        magic_table = await super().from_polars(df, label)
-        return cls(magic_table.to_pandas())
+    async def join_with_query(self, natural_query: str) -> "NotSoMagicTable":
+        magic_table = await MagicTable.from_polars(pl.from_pandas(self), "temp_label")
+        result = await magic_table.join_with_query(natural_query)
+        return NotSoMagicTable(result.to_pandas())
 
-    def __init__(self, df=None):
-        if df is None:
-            df = pd.DataFrame()
-        super().__init__(df)
-        self._df = df
+    async def chain(self, *args, **kwargs) -> "NotSoMagicTable":
+        magic_table = await MagicTable.from_polars(pl.from_pandas(self), "temp_label")
+        result = await magic_table.chain(*args, **kwargs)
+        return NotSoMagicTable(result.to_pandas())
+
+    async def transform(self, natural_query: str) -> "NotSoMagicTable":
+        magic_table = await MagicTable.from_polars(pl.from_pandas(self), "temp_label")
+        result = await magic_table.transform(natural_query)
+        return NotSoMagicTable(result.to_pandas())
+
+    async def clear_all_data(self):
+        magic_table = await MagicTable.from_polars(pl.from_pandas(self), "temp_label")
+        await magic_table.clear_all_data()
 
     def __getattribute__(self, name):
         try:
-            attr = object.__getattribute__(self, name)
-            if callable(attr):
+            return super().__getattribute__(name)
+        except AttributeError:
+            if hasattr(MagicTable, name):
 
-                def wrapper(*args, **kwargs):
-                    result = attr(*args, **kwargs)
+                async def wrapper(*args, **kwargs):
+                    magic_table = await MagicTable.from_polars(
+                        pl.from_pandas(self), "temp_label"
+                    )
+                    method = getattr(magic_table, name)
+                    result = await method(*args, **kwargs)
                     if isinstance(result, MagicTable):
                         return NotSoMagicTable(result.to_pandas())
                     return result
 
                 return wrapper
-            return attr
-        except AttributeError:
-            # If the attribute is not found in NotSoMagicTable, try to get it from MagicTable
-            return getattr(super(), name)
+            raise
 
-    def to_pandas(self):
-        return self._df
+    def __await__(self):
+        return self.__await_impl__().__await__()
 
-    def __repr__(self):
-        return f"NotSoMagicTable(\n{self.to_pandas().__repr__()}\n)"
-
-    def __str__(self):
-        return self.__repr__()
-
-    @classmethod
-    async def _get_existing_api_data(
-        cls, api_url: str, include_embedding: bool = False
-    ):
-        # Create an instance with an empty DataFrame
-        instance = cls()
-        return await super(NotSoMagicTable, cls)._get_existing_api_data(
-            api_url, include_embedding
-        )
+    async def __await_impl__(self):
+        return self

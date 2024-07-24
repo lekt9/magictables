@@ -17,7 +17,7 @@ async def main():
 
     # Fetch popular movies
     # print("\nFetching popular movies...")
-    popular_movies = await MagicTable.from_api(
+    popular_movies = await NotSoMagicTable.from_api(
         f"https://api.themoviedb.org/3/movie/popular?api_key={API_KEY}"
     )
     # print(popular_movies)
