@@ -1,94 +1,319 @@
-from neo4j import AsyncDriver, AsyncGraphDatabase
-from spycy.spycy import CypherExecutor, NetworkXGraph
-
-import pickle
+import asyncio
+import logging
+import time
+import urllib.parse
+import json
 import os
-import hashlib
-import pandas as pd
+from typing import List, Dict, Any, Optional
+
+import aiofiles
+from neo4j import AsyncDriver, AsyncGraphDatabase, Query, basic_auth
+
+# logging.basicConfig(filename="example.log", level=logging.DEBUG)
 
 
-class FallbackAsyncDriver(AsyncDriver):
-    def __init__(self, uri, auth=None, cache_file="spycy_cache.pkl", **config):
-        super().__init__(uri, auth, **config)
-        self.neo4j_driver = AsyncGraphDatabase.driver(uri, auth=auth, **config)
-        self.cache_file = cache_file
-        self.graph = self._load_cache()
-        self.spycy_executor = CypherExecutor(graph=self.graph)
+class HybridResult:
+    def __init__(self, data: List[Dict[str, Any]]):
+        self.data = data
+        self._index = 0
 
-    def _load_cache(self):
-        if os.path.exists(self.cache_file):
-            with open(self.cache_file, "rb") as f:
-                return pickle.load(f)
-        return NetworkXGraph()
+    async def single(self) -> Optional["HybridRecord"]:
+        if self._index < len(self.data):
+            record = self.data[self._index]
+            self._index += 1
+            return HybridRecord(record)
+        return None
 
-    def _save_cache(self):
-        with open(self.cache_file, "wb") as f:
-            pickle.dump(self.spycy_executor.graph, f)
+    async def consume(self) -> "HybridResultSummary":
+        self._index = len(self.data)
+        return HybridResultSummary(len(self.data))
 
-    def _hash_query(self, query, parameters):
-        query_str = query if isinstance(query, str) else query.text
-        param_str = str(sorted(parameters.items())) if parameters else ""
-        return hashlib.md5((query_str + param_str).encode()).hexdigest()
+    async def fetch(self, n: int) -> List["HybridRecord"]:
+        records = []
+        for _ in range(n):
+            record = await self.single()
+            if record is None:
+                break
+            records.append(record)
+        return records
 
-    async def execute_query(self, query, parameters=None, **kwargs):
-        query_hash = self._hash_query(query, parameters)
+    def __aiter__(self):
+        return self
 
-        # Try to get result from cache
-        cached_result = self.spycy_executor.exec(
-            f"MATCH (c:CachedQuery {{hash: '{query_hash}'}}) RETURN c.result"
-        )
-        if not cached_result.empty:
-            print("Using cached result")
-            return self._create_async_result(cached_result.iloc[0]["c.result"])
+    async def __anext__(self) -> "HybridRecord":
+        record = await self.single()
+        if record is None:
+            raise StopAsyncIteration
+        return record
 
-        # If not in cache, try to execute on Neo4j
-        try:
-            neo4j_result = await self.neo4j_driver.execute_query(
-                query, parameters, **kwargs
+
+class HybridRecord:
+    def __init__(self, data: Dict[str, Any]):
+        self.data = data
+
+    def __getitem__(self, key):
+        return self.data.get(key)
+
+    def get(self, key, default=None):
+        return self.data.get(key, default)
+
+
+class HybridResultSummary:
+    def __init__(self, affected_items: int):
+        self.counters = HybridSummaryCounters(affected_items)
+
+
+class HybridSummaryCounters:
+    def __init__(self, affected_items: int):
+        self.nodes_created = 0
+        self.nodes_deleted = 0
+        self.relationships_created = 0
+        self.relationships_deleted = 0
+        self.properties_set = 0
+        self.labels_added = 0
+        self.labels_removed = 0
+        self.indexes_added = 0
+        self.indexes_removed = 0
+        self.constraints_added = 0
+        self.constraints_removed = 0
+        self._affected_items = affected_items
+
+    def __getitem__(self, key):
+        return getattr(self, key, 0)
+
+    @property
+    def contains_updates(self) -> bool:
+        return self._affected_items > 0
+
+
+class HybridDriver:
+    def __init__(self, uri: str, user: str, password: str, cache_dir: str = "cache"):
+        self.uri = uri
+        self.user = user
+        self.password = password
+        self.cache_dir = cache_dir
+        self._data: Dict[str, Any] = {}
+        self._neo4j_driver: Optional[AsyncDriver] = None
+
+        if not os.path.exists(self.cache_dir):
+            os.makedirs(self.cache_dir)
+
+        # Load the cache when initializing the driver
+        asyncio.create_task(self._load_cache())
+
+    async def _load_cache(self):
+        cache_file = os.path.join(self.cache_dir, "graph_cache.json")
+        if os.path.exists(cache_file):
+            try:
+                async with aiofiles.open(cache_file, "r") as f:
+                    content = await f.read()
+                    if content.strip():  # Check if the content is not empty
+                        self._data = json.loads(content)
+                    else:
+                        logging.warning(
+                            f"Cache file {cache_file} is empty. Initializing empty cache."
+                        )
+                        self._data = {}
+            except json.JSONDecodeError as e:
+                logging.error(
+                    f"Error decoding JSON from cache file {cache_file}: {str(e)}"
+                )
+                logging.info("Initializing empty cache.")
+                self._data = {}
+            except Exception as e:
+                logging.error(f"Error reading cache file {cache_file}: {str(e)}")
+                logging.info("Initializing empty cache.")
+                self._data = {}
+        else:
+            logging.info(
+                f"Cache file {cache_file} does not exist. Initializing empty cache."
             )
-            records = await neo4j_result.records()
-            result_list = [dict(record) for record in records]
+            self._data = {}
 
-            # Cache the result
-            cache_query = f"""
-            CREATE (c:CachedQuery {{hash: '{query_hash}', result: {result_list}}})
-            """
-            self.spycy_executor.exec(cache_query)
-            self._save_cache()
+    async def _save_cache(self):
+        cache_file = os.path.join(self.cache_dir, "graph_cache.json")
+        async with aiofiles.open(cache_file, "w") as f:
+            await f.write(json.dumps(self._data, indent=2))
 
-            return self._create_async_result(result_list)
-        except Exception as e:
-            print(f"Neo4j query failed: {e}")
-            # If Neo4j fails, try to execute on spycy
-            spycy_result = self.spycy_executor.exec(query)
-            return self._create_async_result(spycy_result.to_dict("records"))
+    async def _get_neo4j_driver(self) -> AsyncDriver:
+        if self._neo4j_driver is None:
+            parsed_uri = urllib.parse.urlparse(self.uri)
+            scheme = parsed_uri.scheme
+            if scheme in ["bolt", "neo4j", "bolt+s"]:
+                self._neo4j_driver = AsyncGraphDatabase.driver(
+                    self.uri, auth=(self.user, self.password)
+                )
+            elif scheme in ["http", "https"]:
+                self._neo4j_driver = AsyncGraphDatabase.driver(
+                    self.uri,
+                    auth=basic_auth(self.user, self.password),
+                )
+            else:
+                raise ValueError(f"Unsupported URI scheme: {scheme}")
+        return self._neo4j_driver
 
-    def _create_async_result(self, result):
-        async def result_to_records():
-            for item in result:
-                yield item
-
-        class SpycyAsyncResult:
-            def __init__(self, result):
-                self.result = result
-
-            async def records(self):
-                return result_to_records()
-
-        return SpycyAsyncResult(result)
-
-    async def verify_connectivity(self):
-        try:
-            return await self.neo4j_driver.verify_connectivity()
-        except:
-            return True  # Assume spycy is always connected
+    def session(self, **kwargs):
+        return HybridSession(self, **kwargs)
 
     async def close(self):
-        self._save_cache()
-        await self.neo4j_driver.close()
+        await self._save_cache()
+        if self._neo4j_driver:
+            await self._neo4j_driver.close()
 
 
-class FallbackAsyncGraphDatabase:
-    @staticmethod
-    def driver(uri, auth=None, cache_file="spycy_cache.pkl", **config):
-        return FallbackAsyncDriver(uri, auth, cache_file, **config)
+class HybridSession:
+    def __init__(self, driver: HybridDriver, **kwargs):
+        self.driver = driver
+        self.kwargs = kwargs
+        self._neo4j_session = None
+        self._use_cache_only = False
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.close()
+
+    async def _get_neo4j_session(self):
+        if self._use_cache_only:
+            return None
+        if self._neo4j_session is None:
+            try:
+                neo4j_driver = await self.driver._get_neo4j_driver()
+                self._neo4j_session = await neo4j_driver.session(
+                    **self.kwargs
+                ).__aenter__()
+            except Exception as e:
+                logging.warning(
+                    f"Failed to connect to Neo4j: {str(e)}. Using cache only."
+                )
+                self._use_cache_only = True
+        return self._neo4j_session
+
+    async def close(self):
+        if self._neo4j_session:
+            await self._neo4j_session.__aexit__(None, None, None)
+            self._neo4j_session = None
+
+    async def run(self, query: str, parameters: Dict[str, Any] = None, **kwargs):
+        try:
+            neo4j_session = await self._get_neo4j_session()
+            if neo4j_session:
+                return await neo4j_session.run(query, parameters, **kwargs)
+            else:
+                # Use cache-only logic here
+                return await self._run_from_cache(query, parameters, **kwargs)
+        except:
+            return await self._run_from_cache(query, parameters, **kwargs)
+
+    async def _run_from_cache(
+        self, query: str, parameters: Dict[str, Any] = None, **kwargs
+    ):
+        # Implement cache-only query execution logic here
+        # This method should parse the query, fetch data from the cache, and return a HybridResult
+        # You'll need to implement the logic to interpret the query and return appropriate results from the cache
+        # For example:
+        if "MATCH" in query:
+            try:
+                node_type = query.split("(")[1].split(":")[1].split(")")[0]
+                cached_data = self.driver._data.get(node_type, [])
+                return HybridResult(cached_data)
+            except IndexError:
+                logging.warning(
+                    "Failed to parse node type from query. Returning empty result."
+                )
+                return HybridResult([])
+        else:
+            logging.warning(
+                "Non-MATCH query cannot be served from cache. Returning empty result."
+            )
+            return HybridResult([])
+
+
+async def run(self, query: str, parameters: Dict[str, Any] = None, **kwargs):
+    start_time = time.time()
+    cache_used = False
+    if not self.driver._data:
+        await self.driver._load_cache()
+
+    query_str = query.text if isinstance(query, Query) else query
+
+    # Check if the query is a MATCH query that we can handle with the cache
+    if "MATCH" in query_str:
+        try:
+            node_type = query_str.split("(")[1].split(":")[1].split(")")[0]
+            cached_data = self.driver._data.get(node_type, [])
+            if cached_data:
+                cache_used = True
+                end_time = time.time()
+                logging.info(
+                    f"Cache hit for node type '{node_type}'. Query executed in {end_time - start_time:.4f} seconds."
+                )
+                return HybridResult(cached_data)
+        except IndexError:
+            # If we can't parse the node type, we'll fall back to using the database
+            pass
+
+        # Try to use Neo4j, but fall back to cache if connection fails
+        try:
+            neo4j_session = await self._get_neo4j_session()
+            result = await neo4j_session.run(query, parameters, **kwargs)
+            data = await result.data()
+
+            # Store the result in the cache if it's a MATCH query
+            if "MATCH" in query_str:
+                try:
+                    node_type = query_str.split("(")[1].split(":")[1].split(")")[0]
+                    self.driver._data[node_type] = data
+                    await self.driver._save_cache()
+                except IndexError:
+                    # If we can't parse the node type, we won't cache the result
+                    pass
+        except Exception as e:
+            logging.error(
+                f"Failed to connect to Neo4j: {str(e)}. Falling back to cache."
+            )
+            # Fall back to cache
+            if "MATCH" in query_str:
+                try:
+                    node_type = query_str.split("(")[1].split(":")[1].split(")")[0]
+                    cached_data = self.driver._data.get(node_type, [])
+                    if cached_data:
+                        cache_used = True
+                        data = cached_data
+                    else:
+                        logging.warning(
+                            f"No cache data available for node type '{node_type}'."
+                        )
+                        data = []
+                except IndexError:
+                    logging.warning(
+                        "Failed to parse node type from query. Returning empty result."
+                    )
+                    data = []
+            else:
+                logging.warning(
+                    "Non-MATCH query failed and cannot be served from cache. Returning empty result."
+                )
+                data = []
+
+        end_time = time.time()
+        execution_time = end_time - start_time
+        cache_status = "Cache hit" if cache_used else "Cache miss"
+        logging.info(f"{cache_status}. Query executed in {execution_time:.4f} seconds.")
+
+        return HybridResult(data)
+
+    async def close(self):
+        if self._neo4j_session:
+            await self._neo4j_session.__aexit__(None, None, None)
+            self._neo4j_session = None
+
+    def _get_query_type(self, query: str) -> str:
+        query = query.strip().upper()
+        if query.startswith(("MATCH", "RETURN", "CALL")):
+            return "READ"
+        elif query.startswith(("CREATE", "MERGE", "SET", "DELETE", "REMOVE")):
+            return "WRITE"
+        else:
+            return "OTHER"
