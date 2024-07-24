@@ -47,7 +47,7 @@ class HybridResult:
         return record
 
 
-from typing import Dict, Any, List, Tuple, Iterable
+from typing import Dict, Any, List, Tuple
 
 
 class HybridRecord:
@@ -243,28 +243,39 @@ class HybridSession:
         try:
             neo4j_session = await self._get_neo4j_session()
             if neo4j_session:
-                return await neo4j_session.run(query, parameters, **kwargs)
+                result = await neo4j_session.run(query, parameters, **kwargs)
             else:
                 # Use cache-only logic here
-                return await self._run_from_cache(query, parameters, **kwargs)
+                result = await self._run_from_cache(query, parameters, **kwargs)
+            await self._save_cache()
+            return result
         except:
             return await self._run_from_cache(query, parameters, **kwargs)
 
     async def _run_from_cache(
         self, query: str, parameters: Dict[str, Any] = None, **kwargs
     ):
-        # Implement cache-only query execution logic here
-        # This method should parse the query, fetch data from the cache, and return a HybridResult
-        # You'll need to implement the logic to interpret the query and return appropriate results from the cache
-        # For example:
-        if "MATCH" in query:
+        if not isinstance(query, str):
+            logging.warning(
+                f"Query is not a string. Type: {type(query)}. Returning empty result."
+            )
+            return HybridResult([])
+
+        if "MATCH" in query.upper():
             try:
-                node_type = query.split("(")[1].split(":")[1].split(")")[0]
-                cached_data = self.driver._data.get(node_type, [])
-                return HybridResult(cached_data)
-            except IndexError:
+                # Use a more robust method to extract node type
+                import re
+
+                match = re.search(r"\([\w:]*:(\w+)\)", query)
+                if match:
+                    node_type = match.group(1)
+                    cached_data = self.driver._data.get(node_type, [])
+                    return HybridResult(cached_data)
+                else:
+                    raise ValueError("No node type found in query")
+            except (IndexError, ValueError) as e:
                 logging.warning(
-                    "Failed to parse node type from query. Returning empty result."
+                    f"Failed to parse node type from query: {str(e)}. Returning empty result."
                 )
                 return HybridResult([])
         else:

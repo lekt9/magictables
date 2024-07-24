@@ -1,12 +1,15 @@
 # utils.py
 import json
 import os
+import random
 from typing import Any, Dict, List
 import aiohttp
 from dotenv import load_dotenv
 
 import logging
-from litellm import acompletion
+from litellm import acompletion, aembedding
+from typing import List
+import asyncio
 
 
 logging.basicConfig(level=logging.DEBUG)
@@ -143,3 +146,81 @@ async def call_ai_model(
         error_message = f"API request failed: {str(e)}"
         logging.error(error_message)
         raise Exception(error_message)
+
+
+# Define a custom exception for API errors
+class APIError(Exception):
+    pass
+
+
+# Define the backoff handler
+def on_backoff(details):
+    logging.warning(
+        f"Backing off {details['wait']:0.1f} seconds after {details['tries']} tries"
+    )
+
+
+async def generate_embeddings(
+    texts: List[str], provider: str = os.getenv("EMBEDDING_PROVIDER", "openai")
+):
+    max_retries = 5
+    base_delay = 1  # Start with 1 second delay
+
+    for attempt in range(max_retries):
+        try:
+            logging.debug("texts")
+            logging.debug(texts)
+
+            model = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+            api_base = os.getenv(
+                f"{provider.upper()}_API_BASE", "https://api.openai.com/v1"
+            )
+            api_key = os.getenv(f"{provider.upper()}_API_KEY")
+
+            if provider.lower() == "jina":
+                async with aiohttp.ClientSession() as session:
+                    headers = {
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {api_key}",
+                    }
+                    payload = {"model": model, "input": texts}
+                    async with session.post(
+                        f"{api_base}/embeddings", headers=headers, json=payload
+                    ) as response:
+                        if response.status == 200:
+                            result = await response.json()
+                            embeddings = [item["embedding"] for item in result["data"]]
+                            logging.debug(f"Generated {len(embeddings)} embeddings")
+                            logging.debug(f"Usage: {result['usage']}")
+                            return embeddings
+                        else:
+                            error_text = await response.text()
+                            raise APIError(
+                                f"API request failed with status {response.status}: {error_text}"
+                            )
+            else:
+                response = await aembedding(
+                    model=model,
+                    input=texts,
+                    api_base=api_base,
+                    api_key=api_key,
+                    api_type="openai",
+                )
+                return [item["embedding"] for item in response["data"]]
+
+        except (aiohttp.ClientError, APIError) as e:
+            if attempt == max_retries - 1:  # Last attempt
+                logging.error(f"Failed after {max_retries} attempts: {str(e)}")
+                raise
+
+            delay = (2**attempt) * base_delay + random.uniform(0, 0.1 * (2**attempt))
+            logging.warning(
+                f"Attempt {attempt + 1} failed. Retrying in {delay:.2f} seconds..."
+            )
+            await asyncio.sleep(delay)
+
+        except Exception as e:
+            logging.error(
+                f"Unexpected error generating embedding with {provider}: {str(e)}"
+            )
+            raise

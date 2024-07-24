@@ -1,4 +1,4 @@
-import random
+from string import Formatter
 import urllib.parse
 from magictables.fallback_driver import HybridDriver
 
@@ -12,10 +12,13 @@ from typing import Dict, Any, Optional, List, Tuple, Union
 from neo4j import Query
 import hashlib
 
-from magictables.utils import call_ai_model, flatten_nested_structure
+from magictables.utils import (
+    call_ai_model,
+    generate_embeddings,
+    flatten_nested_structure,
+)
 from dotenv import load_dotenv
 import pandas as pd
-import litellm
 
 load_dotenv()
 
@@ -91,8 +94,8 @@ class MagicTable(pl.DataFrame):
         magic_df = cls(df)
         api_url = f"local://{label}"
         description = f"Local DataFrame: {label}"
-        embedding = await magic_df._generate_embedding(description)
-        await magic_df._store_in_neo4j(label, api_url, description, embedding)
+        embedding = await generate_embeddings([description])
+        await magic_df._store_in_neo4j(label, api_url, description, embedding[0])
         return magic_df
 
     @classmethod
@@ -129,10 +132,8 @@ class MagicTable(pl.DataFrame):
             else path_parts[-2].capitalize()
         )
 
-        api_description = await df._generate_api_description(api_url, data[:1])
-
         logger.debug(f"Storing data for API URL: {api_url}")
-        await df._store_rows_in_neo4j(label, api_url, api_description)
+        await df._store_rows_in_neo4j(label, api_url)
 
         df.api_urls.append(api_url)
         return df._parse_json_fields()
@@ -141,95 +142,84 @@ class MagicTable(pl.DataFrame):
         self,
         label: str,
         api_url: str,
-        api_description: str,
         transform_query: Optional[str] = None,
         pandas_code: Optional[str] = None,
     ):
         sanitized_label = self._sanitize_label(label)
         logger.debug(f"Storing rows with label: {sanitized_label}, API URL: {api_url}")
 
-        # Generate query_key
-        query_key = self._generate_query_key(
-            transform_query or "", [[(api_url, api_description, 1.0)]]
-        )
-
-        # Prepare all rows at once
-        rows = []
-        for row in self.to_dicts():
-            standardized_row = self._standardize_data_types(row)
-            node_id = self._generate_node_id(sanitized_label, standardized_row)
-            combined_text = f"{api_description} {json.dumps(standardized_row)}"
-            rows.append(
-                {
-                    "node_id": node_id,
-                    "row": standardized_row,
-                    "combined_text": combined_text,
-                }
-            )
-
-        # Generate embeddings concurrently
-        embeddings = await asyncio.gather(
-            *[self._generate_embedding(row["combined_text"]) for row in rows]
-        )
-
-        # Add embeddings to rows
-        for row, embedding in zip(rows, embeddings):
-            row["embedding"] = embedding
-
-        # Check if rows already exist
         driver = await self._get_driver()
         async with driver.session() as session:
-            node_ids = [row["node_id"] for row in rows]
+            # Check if API description already exists
             result = await session.run(
-                f"""
-                UNWIND $node_ids AS node_id
-                MATCH (d:{sanitized_label} {{id: node_id}})
-                RETURN collect(d.id) AS existing_ids
-                """,
-                node_ids=node_ids,
+                "MATCH (a:APIEndpoint {url: $api_url}) RETURN a.description",
+                api_url=api_url,
             )
-            record = await result.single()
-            existing_node_ids = set(record["existing_ids"] if record else [])
-            # Filter out existing rows
-            rows_to_store = [
-                row for row in rows if row["node_id"] not in existing_node_ids
-            ]
+            existing_description = await result.single()
 
-            if not rows_to_store:
-                logger.info("No new rows to store in Neo4j")
-                return
+            if existing_description and existing_description["a.description"]:
+                api_description = existing_description["a.description"]
+            else:
+                # Generate API description if it doesn't exist
+                api_description = await self._generate_api_description(
+                    api_url, self.to_dicts()[:50]
+                )
 
-            # Construct a single Cypher query for bulk insert
-            query = Query(
-                f"""
-                MERGE (a:APIEndpoint {{url: $api_url}})
-                SET a.description = $api_description
-                WITH a
-                UNWIND $rows AS row
-                MERGE (d:{sanitized_label} {{id: row.node_id}})
-                SET d += row.row,
-                    d.embedding = row.embedding
-                MERGE (d)-[:SOURCED_FROM]->(a)
-                WITH d, a
-                
-                // Create TransformedData node if transform was applied
-                {f'''
-                MERGE (q:QueryNode {{key: $query_key}})
-                SET q.natural_query = $transform_query
-                MERGE (t:TransformedData {{id: apoc.create.uuid()}})
-                SET t += d
-                MERGE (q)-[r:TRANSFORMED_BY]->(t)
-                SET r.pandas_code = $pandas_code
-                ''' if transform_query and pandas_code else ''}
-                RETURN count(d) as nodes_created
-                """  # type: ignore
+            # Generate query_key
+            query_key = self._generate_query_key(
+                transform_query or "", [[(api_url, api_description, 1.0)]]
             )
+
+            # Prepare all rows at once
+            rows = []
+            combined_texts = []
+            for row in self.to_dicts():
+                standardized_row = self._standardize_data_types(row)
+                node_id = self._generate_node_id(sanitized_label, standardized_row)
+                combined_text = f"{api_description} {json.dumps(standardized_row)}"
+                rows.append(
+                    {
+                        "node_id": node_id,
+                        "row": standardized_row,
+                    }
+                )
+                combined_texts.append(combined_text)
+
+            # Generate embeddings in one batch
+            embeddings = await generate_embeddings(combined_texts)
+
+            # Add embeddings to rows
+            for row, embedding in zip(rows, embeddings):
+                row["embedding"] = embedding
+
+            # Single query to check existing nodes, insert new ones, and create relationships
+            query = f"""
+            MERGE (a:APIEndpoint {{url: $api_url}})
+            SET a.description = $api_description
+            WITH a
+            UNWIND $rows AS row
+            MERGE (d:{sanitized_label} {{id: row.node_id}})
+            ON CREATE SET d += row.row, d.embedding = row.embedding
+            MERGE (d)-[:SOURCED_FROM]->(a)
+            WITH d, a
+            
+            // Create TransformedData node if transform was applied
+            {f'''
+            MERGE (q:QueryNode {{key: $query_key}})
+            SET q.natural_query = $transform_query
+            MERGE (t:TransformedData {{id: apoc.create.uuid()}})
+            SET t += d
+            MERGE (q)-[r:TRANSFORMED_BY]->(t)
+            SET r.pandas_code = $pandas_code
+            ''' if transform_query and pandas_code else ''}
+            RETURN count(d) as nodes_created
+            """
 
             result = await session.run(
                 query,
                 api_url=api_url,
                 api_description=api_description,
-                rows=rows_to_store,
+                rows=rows,
                 query_key=query_key,
                 transform_query=transform_query,
                 pandas_code=pandas_code,
@@ -336,76 +326,6 @@ class MagicTable(pl.DataFrame):
 
         return description
 
-    async def _generate_embedding(self, text: str) -> List[float]:
-        provider = os.getenv("EMBEDDING_PROVIDER", "jina").lower()
-        model = os.getenv("EMBEDDING_MODEL", "text-embedding-ada-002")
-
-        if provider == "jina":
-            logger.debug("generating jina embedding")
-            return await self._generate_jina_embedding(text)
-        else:
-            return await self._generate_litellm_embedding(text, provider, model)
-
-    async def _generate_jina_embedding(self, text: str) -> List[float]:
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.jina_api_key}",
-        }
-        data = {
-            "model": "jina-embeddings-v2-base-en",
-            "embedding_type": "float",
-            "input": [text],
-        }
-
-        # Configure retry options
-        retry_options = aiohttp.ClientTimeout(total=30)  # 30 seconds total timeout
-        retry_attempts = 3
-        retry_delay = 1  # 1 second delay between retries
-
-        async def fetch_with_retry():
-            for attempt in range(retry_attempts):
-                try:
-                    async with aiohttp.ClientSession(
-                        timeout=retry_options, connector=aiohttp.TCPConnector(ssl=False)
-                    ) as session:
-                        async with session.post(
-                            "https://api.jina.ai/v1/embeddings",
-                            headers=headers,
-                            json=data,
-                        ) as response:
-                            response.raise_for_status()  # Raise an exception for non-200 status codes
-                            result = await response.json()
-                            logging.debug("Got embedding")
-                            return result["data"][0]["embedding"]
-                except aiohttp.ClientError as e:
-                    if attempt == retry_attempts - 1:  # Last attempt
-                        logging.error(
-                            f"Failed to get embedding after {retry_attempts} attempts: {str(e)}"
-                        )
-                        raise
-                    else:
-                        logging.warning(
-                            f"Attempt {attempt + 1} failed, retrying in {retry_delay} seconds..."
-                        )
-                        await asyncio.sleep(retry_delay)
-
-        return await fetch_with_retry()  # type: ignore
-
-    async def _generate_litellm_embedding(
-        self, text: str, provider: str, model: str
-    ) -> List[float]:
-        try:
-            response = await litellm.aembedding(
-                model=model,
-                input=[text],
-                api_base=os.getenv(f"{provider.upper()}_API_BASE"),
-                api_key=os.getenv(f"{provider.upper()}_API_KEY"),
-            )
-            return response["data"][0]["embedding"]
-        except Exception as e:
-            logger.error(f"Error generating embedding with {provider}: {str(e)}")
-            raise
-
     @staticmethod
     def _generate_node_id(label: str, data: Dict[str, Any]) -> str:
         key_fields = ["id", "uuid", "name", "email"]
@@ -425,7 +345,7 @@ class MagicTable(pl.DataFrame):
             queries = [queries]
 
         async def process_query(query):
-            query_embedding = await self._generate_embedding(query)
+            query_embedding = await generate_embeddings(texts=[query])
 
             driver = await self._get_driver()
             async with driver.session() as session:
@@ -762,7 +682,8 @@ class MagicTable(pl.DataFrame):
             response = await call_ai_model(
                 [],
                 prompt,
-                model="openrouter/anthropic/claude-3.5-sonnet:beta",
+                model="gpt-4o",
+                # model="openrouter/anthropic/claude-3.5-sonnet:beta",
             )
 
             if isinstance(response, str):
@@ -871,96 +792,51 @@ class MagicTable(pl.DataFrame):
             return (str(stored_queries[0]), str(stored_queries[1]))
         return None
 
-    async def chain(
-        self,
-        api_url: Union[str, Dict[str, str]],
-        params: Optional[Dict[str, Any]] = None,
-    ) -> "MagicTable":
-        if isinstance(api_url, str):
-            key_columns = await self._identify_key_columns(api_url)
-            api_url_dict = {col: api_url for col in key_columns}
+    async def chain(self, other: Union["MagicTable", str]) -> "MagicTable":
+        if isinstance(other, str):
+            other_api_url_template = other
+        elif isinstance(other, MagicTable) and other.api_urls:
+            other_api_url_template = other.api_urls[-1]
         else:
-            api_url_dict = api_url
-
-        async def fetch_api_data(
-            url, params, max_retries=5, base_delay=1, max_delay=60
-        ):
-            for attempt in range(max_retries):
-                try:
-                    async with aiohttp.ClientSession() as session:
-                        logging.debug(f"Sending request to URL: {url}")
-                        async with session.get(url, params=params) as response:
-                            response.raise_for_status()
-                            response_data = await response.json()
-                            if response_data is None or len(response_data) == 0:
-                                raise aiohttp.ClientResponseError(
-                                    request_info=None,
-                                    history=None,
-                                    status=200,
-                                    message="Empty or None response",
-                                    headers=None,
-                                )
-                            return response_data
-                except (aiohttp.ClientError, aiohttp.ClientResponseError) as e:
-                    if attempt == max_retries - 1:
-                        logging.error(
-                            f"Failed to fetch data after {max_retries} attempts: {str(e)}"
-                        )
-                        raise
-                    else:
-                        delay = min(max_delay, base_delay * (2**attempt))
-                        jitter = random.uniform(0, 0.1 * delay)  # Add up to 10% jitter
-                        total_delay = delay + jitter
-                        logging.warning(
-                            f"Attempt {attempt + 1} failed, retrying in {total_delay:.2f} seconds..."
-                        )
-                        await asyncio.sleep(total_delay)
-
-        # Parse the URL to extract parameters
-        parsed_url = urllib.parse.urlparse(next(iter(api_url_dict.values())))
-        query_params = urllib.parse.parse_qs(parsed_url.query)
-        url_params = set(query_params.keys())
-
-        # Map DataFrame columns to URL parameters
-        param_mapping = {}
-        for param in url_params:
-            matching_columns = [
-                col for col in self.columns if param.lower() in col.lower()
-            ]
-            if matching_columns:
-                param_mapping[param] = matching_columns[0]
-            else:
-                raise ValueError(f"No matching column found for URL parameter: {param}")
-
-        api_calls = []
-        for row in self.iter_rows(named=True):
-            call_params = {param: row[col] for param, col in param_mapping.items()}
-            if params:
-                call_params.update(params)
-            formatted_url = next(iter(api_url_dict.values())).format(**call_params)
-            api_calls.append(fetch_api_data(formatted_url, call_params))
-
-        results = await asyncio.gather(*api_calls)
-
-        logging.error(results)
-
-        # Combine all API results into a single DataFrame
-        api_df = pl.DataFrame(results)
-
-        # Identify join keys that exist in both DataFrames
-        join_keys = [
-            col
-            for col in param_mapping.values()
-            if col in self.columns and col in api_df.columns
-        ]
-
-        if not join_keys:
-            logger.warning(
-                "No common join keys found. API results will be appended as new columns."
+            raise ValueError(
+                "Invalid input for chaining. Expected MagicTable with API URL or API URL template string."
             )
-            return MagicTable(pl.concat([self, api_df], how="horizontal"))
-        else:
-            return MagicTable(self.join(api_df, on=join_keys, how="left"))
+
+        # Prepare API calls for each row
+        async def call_api_for_row(row):
+            formatted_url = self._format_url_template(other_api_url_template, row)
+            return await self.from_api(formatted_url)
+
+        # Make API calls concurrently
+        api_results = await asyncio.gather(
+            *[call_api_for_row(row) for row in self.iter_rows(named=True)]
+        )
+
+        # Combine results
+        combined_results = []
+        for i, row in enumerate(self.iter_rows(named=True)):
+            combined_row = {**row, **api_results[i].to_dict(as_series=False)}
+            combined_results.append(combined_row)
+
+        # Create a new MagicTable with combined results
+        result_df = MagicTable(pl.DataFrame(combined_results))
+        result_df.api_urls = self.api_urls + [other_api_url_template]
+
+        return result_df
+
+    def _identify_template_params(self, url_template: str) -> List[str]:
+        """
+        Identify the parameters in the URL template.
+        """
+        return [fname for _, fname, _, _ in Formatter().parse(url_template) if fname]
+
+    def _format_url_template(self, url_template: str, row: Dict[str, Any]) -> str:
+        """
+        Format the URL template with values from the row.
+        """
+        return url_template.format(
+            **{k: row.get(k, "") for k in self._identify_template_params(url_template)}
+        )
 
     @staticmethod
     def _is_numeric_dtype(dtype):
