@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "magictables"
-version = "1.0.5"
+version = "1.0.6"
 description = "An advanced Python library designed to streamline data preparation and exploration for data scientists"
 authors = ["Lewis <lewis@magictables.org>"]
 license = "GPL-3.0"

@@ -825,28 +825,55 @@ result = df
         else:
             api_url_dict = api_url
 
-        async def process_row(row: Dict[str, Any]) -> List[Dict[str, Any]]:
-            results = []
-            for col, url_template in api_url_dict.items():
-                key_value = row[col]
-                url = url_template.format(**{col: key_value})
-                try:
-                    async with aiohttp.ClientSession() as session:
-                        async with session.get(url, params=params) as response:
-                            data = await response.json()
-                    flattened_data = flatten_nested_structure(data)
-                    if expand and isinstance(flattened_data, list):
-                        for item in flattened_data:
-                            item[key] = key_value
-                            results.append(item)
-                    else:
-                        results = flattened_data if flattened_data else [{}]
-                        for item in results:
-                            item[key] = key_value
-                except Exception as e:
-                    # print(f"Error fetching data for {col}: {str(e)}")
-                    results.append({key: key_value})
-            return results
+            async def process_row(row: Dict[str, Any]) -> List[Dict[str, Any]]:
+                results = []
+                for col, url_template in api_url_dict.items():
+                    key_value = row[col]
+                    url = url_template.format(**{col: key_value})
+
+                    max_retries = 5
+                    base_delay = 1  # Start with 1 second delay
+
+                    for attempt in range(max_retries):
+                        try:
+                            async with aiohttp.ClientSession() as session:
+                                async with session.get(url, params=params) as response:
+                                    if response.status == 429:  # Too Many Requests
+                                        raise aiohttp.ClientResponseError(
+                                            response.request_info,
+                                            response.history,
+                                            status=429,
+                                        )
+                                    response.raise_for_status()  # Raise an exception for non-200 status codes
+                                    data = await response.json()
+
+                            flattened_data = flatten_nested_structure(data)
+                            if expand and isinstance(flattened_data, list):
+                                for item in flattened_data:
+                                    item[key] = key_value
+                                    results.append(item)
+                            else:
+                                results = flattened_data if flattened_data else [{}]
+                                for item in results:
+                                    item[key] = key_value
+                            break  # Success, exit the retry loop
+
+                        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                            if attempt == max_retries - 1:  # Last attempt
+                                logger.error(
+                                    f"Error fetching data for {col} after {max_retries} attempts: {str(e)}"
+                                )
+                                results.append({key: key_value})
+                            else:
+                                delay = (2**attempt * base_delay) + (
+                                    random.randint(0, 1000) / 1000
+                                )
+                                logger.warning(
+                                    f"Attempt {attempt + 1} failed for {col}. Retrying in {delay:.2f} seconds..."
+                                )
+                                await asyncio.sleep(delay)
+
+                return results
 
         async def process_all_rows():
             tasks = [process_row(row) for row in self.to_dicts()]
@@ -900,6 +927,77 @@ result = df
             pl.Float32,
             pl.Float64,
         ]
+
+    @classmethod
+    async def generate_query_params(
+        cls, url_template: str, query_description: str
+    ) -> "MagicTable":
+        """
+        Generate a MagicTable with query parameters based on the URL template and query description.
+
+        :param url_template: The API URL template with placeholders.
+        :param query_description: A description of the query parameters and their ranges.
+        :return: A MagicTable with generated query parameters.
+        """
+        prompt = f"""
+        Generate Python code to create a pandas DataFrame with query parameters for the following API:
+
+        URL Template: {url_template}
+        Query Description: {query_description}
+
+        The DataFrame should include a column named 'url' that contains the fully formatted URL for each API call,
+        and additional columns for any query parameters that should be passed separately.
+
+        Examples:
+
+        1. URL Template: "https://api.example.com/weather/{{city}}/{{date}}"
+           Query Description: "Fetch weather data for New York, Los Angeles, and Chicago for the first week of January 2024."
+           Expected output:
+           ```python
+           import pandas as pd
+
+           cities = ['New York', 'Los Angeles', 'Chicago']
+           dates = pd.date_range(start='2024-01-01', end='2024-01-07')
+           df = pd.DataFrame([(f"https://api.example.com/weather/{{city}}/{{date.strftime('%Y-%m-%d')}}", city, date)
+                              for city in cities for date in dates],
+                             columns=['url', 'city', 'date'])
+           ```
+
+        2. URL Template: "https://api.example.com/stocks/{{symbol}}/history"
+           Query Description: "Fetch historical stock data for AAPL and GOOGL from 2023-01-01 to 2023-12-31, with monthly intervals. Include a 'period' parameter for daily, weekly, or monthly data."
+           Expected output:
+           ```python
+           import pandas as pd
+
+           symbols = ['AAPL', 'GOOGL']
+           dates = pd.date_range(start='2023-01-01', end='2023-12-31', freq='M')
+           periods = ['daily', 'weekly', 'monthly']
+           df = pd.DataFrame([(f"https://api.example.com/stocks/{{symbol}}/history", symbol, date, period)
+                              for symbol in symbols for date in dates for period in periods],
+                             columns=['url', 'symbol', 'date', 'period'])
+           ```
+
+        Your response should be in the following JSON format:
+        {{
+            "code": "# Your Python code here to generate a pandas DataFrame"
+        }}
+        """
+
+        response = await call_ai_model([], prompt)
+        code = response.get("code", "")
+
+        if not code:
+            raise ValueError("Failed to generate query parameters DataFrame")
+
+        # Execute the generated code
+        local_vars = {"pd": pd}
+        exec(code, globals(), local_vars)
+
+        if "df" in local_vars and isinstance(local_vars["df"], pd.DataFrame):
+            # Convert pandas DataFrame to polars DataFrame
+            return cls(pl.from_pandas(local_vars["df"]))
+        else:
+            raise ValueError("Generated code did not produce a valid DataFrame")
 
     async def _identify_key_column(self, api_url_template: str) -> str:
         """
