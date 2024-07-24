@@ -1,4 +1,5 @@
 import random
+import urllib.parse
 from magictables.fallback_driver import HybridDriver
 
 import asyncio
@@ -13,7 +14,6 @@ import hashlib
 
 from magictables.utils import call_ai_model, flatten_nested_structure
 from dotenv import load_dotenv
-import urllib.parse
 import pandas as pd
 import litellm
 
@@ -179,19 +179,17 @@ class MagicTable(pl.DataFrame):
         # Check if rows already exist
         driver = await self._get_driver()
         async with driver.session() as session:
-            existing_node_ids = set()
-            for row in rows:
-                result = await session.run(
-                    f"""
-                    MATCH (d:{sanitized_label} {{id: $node_id}})
-                    RETURN d.id
-                    """,
-                    node_id=row["node_id"],
-                )
-                record = await result.single()
-                if record:
-                    existing_node_ids.add(row["node_id"])
-
+            node_ids = [row["node_id"] for row in rows]
+            result = await session.run(
+                f"""
+                UNWIND $node_ids AS node_id
+                MATCH (d:{sanitized_label} {{id: node_id}})
+                RETURN collect(d.id) AS existing_ids
+                """,
+                node_ids=node_ids,
+            )
+            record = await result.single()
+            existing_node_ids = set(record["existing_ids"] if record else [])
             # Filter out existing rows
             rows_to_store = [
                 row for row in rows if row["node_id"] not in existing_node_ids
@@ -274,37 +272,76 @@ class MagicTable(pl.DataFrame):
     async def _generate_api_description(
         self, api_url: str, data: List[Dict[str, Any]]
     ) -> str:
+        # Remove query parameters from the URL
+        base_url = api_url.split("?")[0]
+
+        # Check if description already exists in the graph
+        driver = await self._get_driver()
+        async with driver.session() as session:
+            result = await session.run(
+                """
+                MATCH (a:APIEndpoint {url: $base_url})
+                RETURN a.description
+                """,
+                base_url=base_url,
+            )
+            existing_description = await result.single()
+
+            if existing_description:
+                return existing_description["a.description"]
+
+        # If no existing description, generate a new one
         prompt = f"""Generate a concise description of this API endpoint based on the URL and data sample.
 
-Examples:
-1. URL: https://api.example.com/users
-   Data: [{{"id": 1, "name": "John Doe", "email": "john@example.com"}}]
-   {{"description": "This API endpoint provides user information including user ID, name, and email address."}}
+    Examples:
+    1. URL: https://api.example.com/users
+    Data: [{{"id": 1, "name": "John Doe", "email": "john@example.com"}}]
+    {{"description": "This API endpoint provides user information including user ID, name, and email address."}}
 
-2. URL: https://api.example.com/products
-   Data: [{{"id": 101, "name": "Laptop", "price": 999.99, "category": "Electronics"}}]
-   {{"description": "This API endpoint returns product details such as product ID, name, price, and category."}}
+    2. URL: https://api.example.com/products
+    Data: [{{"id": 101, "name": "Laptop", "price": 999.99, "category": "Electronics"}}]
+    {{"description": "This API endpoint returns product details such as product ID, name, price, and category."}}
 
-3. URL: https://api.example.com/orders
-   Data: [{{"order_id": "ORD-001", "user_id": 1, "total": 1299.99, "status": "shipped"}}]
-   {{"description": "This API endpoint provides order information including order ID, associated user ID, total amount, and current status."}}
+    3. URL: https://api.example.com/orders
+    Data: [{{"order_id": "ORD-001", "user_id": 1, "total": 1299.99, "status": "shipped"}}]
+    {{"description": "This API endpoint provides order information including order ID, associated user ID, total amount, and current status."}}
 
-Please provide a similar concise description for the given API endpoint:
-URL: {api_url}
-Data: {json.dumps(data[:1])}
+    Please provide a similar concise description for the given API endpoint:
+    URL: {base_url}
+    Data: {json.dumps(data[:1])}
 
-Your response should be in the following JSON format:
-{{"description": "Your concise description here"}}
-"""
+    Your response should be in the following JSON format:
+    {{"description": "Your concise description here"}}
+    """
 
         response = await call_ai_model(data, prompt)
-        return response.get("description", "Error generating API description")
+        logger.debug(response)
+
+        if isinstance(response, dict):
+            description = response.get(
+                "description", "Error generating API description"
+            )
+        else:
+            description = "Error generating API description"
+
+        # Store the new description in the graph
+        await session.run(
+            """
+            MERGE (a:APIEndpoint {url: $base_url})
+            SET a.description = $description
+            """,
+            base_url=base_url,
+            description=description,
+        )
+
+        return description
 
     async def _generate_embedding(self, text: str) -> List[float]:
         provider = os.getenv("EMBEDDING_PROVIDER", "jina").lower()
         model = os.getenv("EMBEDDING_MODEL", "text-embedding-ada-002")
 
         if provider == "jina":
+            logger.debug("generating jina embedding")
             return await self._generate_jina_embedding(text)
         else:
             return await self._generate_litellm_embedding(text, provider, model)
@@ -319,14 +356,40 @@ Your response should be in the following JSON format:
             "embedding_type": "float",
             "input": [text],
         }
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                "https://api.jina.ai/v1/embeddings", headers=headers, json=data
-            ) as response:
-                result = await response.json()
-                logging.debug("Got embedding")
 
-                return result["data"][0]["embedding"]
+        # Configure retry options
+        retry_options = aiohttp.ClientTimeout(total=30)  # 30 seconds total timeout
+        retry_attempts = 3
+        retry_delay = 1  # 1 second delay between retries
+
+        async def fetch_with_retry():
+            for attempt in range(retry_attempts):
+                try:
+                    async with aiohttp.ClientSession(
+                        timeout=retry_options, connector=aiohttp.TCPConnector(ssl=False)
+                    ) as session:
+                        async with session.post(
+                            "https://api.jina.ai/v1/embeddings",
+                            headers=headers,
+                            json=data,
+                        ) as response:
+                            response.raise_for_status()  # Raise an exception for non-200 status codes
+                            result = await response.json()
+                            logging.debug("Got embedding")
+                            return result["data"][0]["embedding"]
+                except aiohttp.ClientError as e:
+                    if attempt == retry_attempts - 1:  # Last attempt
+                        logging.error(
+                            f"Failed to get embedding after {retry_attempts} attempts: {str(e)}"
+                        )
+                        raise
+                    else:
+                        logging.warning(
+                            f"Attempt {attempt + 1} failed, retrying in {retry_delay} seconds..."
+                        )
+                        await asyncio.sleep(retry_delay)
+
+        return await fetch_with_retry()  # type: ignore
 
     async def _generate_litellm_embedding(
         self, text: str, provider: str, model: str
@@ -342,14 +405,6 @@ Your response should be in the following JSON format:
         except Exception as e:
             logger.error(f"Error generating embedding with {provider}: {str(e)}")
             raise
-
-    @staticmethod
-    def _sanitize_label(label: str) -> str:
-        # Ensure the label starts with a letter
-        if not label[0].isalpha():
-            label = "N" + label
-        # Replace any non-alphanumeric characters with underscores
-        return "".join(c if c.isalnum() else "_" for c in label)
 
     @staticmethod
     def _generate_node_id(label: str, data: Dict[str, Any]) -> str:
@@ -819,155 +874,91 @@ Your response should be in the following JSON format:
     async def chain(
         self,
         api_url: Union[str, Dict[str, str]],
-        key: Optional[str] = None,
         params: Optional[Dict[str, Any]] = None,
-        # expand: bool = False,
-        # groupby: bool = True,  # New parameter to control groupby operation
     ) -> "MagicTable":
-        """
-        Chain data by enriching it with additional information from an API.
-
-        This method allows you to enrich the current DataFrame with data fetched from an API.
-        It supports grouping by the parameters used in the API calls and joining the results
-        with the original DataFrame. This is useful for scenarios where you need to augment
-        your data with additional information from external sources.
-
-        Parameters:
-        - api_url (Union[str, Dict[str, str]]): The API URL or a dictionary mapping column names to API URLs.
-        If a string is provided, the method will identify key columns to use for the API calls.
-        - key (Optional[str]): An optional key to use for the API calls. If not provided, the method will
-        attempt to identify the key columns automatically.
-        - params (Optional[Dict[str, Any]]): Additional parameters to pass to the API calls.
-        - expand (bool): Whether to expand the results. Default is False.
-        - groupby (bool): Whether to group by the parameters used in the API calls before joining.
-        Default is True. If set to False, the DataFrame will be flattened after the join.
-
-        Returns:
-        - MagicTable: A new MagicTable instance with the enriched data.
-
-        Usage:
-        ```python
-        # Example usage with grouping by parameters
-        match_results_url = "https://api.example.com/match_results?startDate={startDate}&endDate={endDate}"
-        match_result_dates = await MagicTable.gen(f"Get me every week from 2022-01-01 to {datetime.today().isoformat()[:10]} in {match_results_url}")
-        match_results = await match_result_dates.chain(match_results_url, groupby=True)
-
-        # Example usage without grouping by parameters
-        match_results = await match_result_dates.chain(match_results_url, groupby=False)
-        ```
-
-        This method handles cases where the URL parameters are not present in the API response,
-        making the chaining process more robust. It also ensures that the original data is preserved
-        even if no join can be performed.
-        """
         if isinstance(api_url, str):
             key_columns = await self._identify_key_columns(api_url)
             api_url_dict = {col: api_url for col in key_columns}
         else:
             api_url_dict = api_url
 
-        async def process_row(
-            row: Dict[str, Any], key: str, key_value: Any
-        ) -> List[Dict[str, Any]]:
-            url_template = next(iter(api_url_dict.values()))  # Get the URL template
-            url_params = {col: row[col] for col in api_url_dict.keys() if col in row}
-            url = url_template.format(**url_params)
-
-            max_retries = 5
-            base_delay = 1  # Start with 1 second delay
-
+        async def fetch_api_data(
+            url, params, max_retries=5, base_delay=1, max_delay=60
+        ):
             for attempt in range(max_retries):
                 try:
                     async with aiohttp.ClientSession() as session:
+                        logging.debug(f"Sending request to URL: {url}")
                         async with session.get(url, params=params) as response:
-                            if response.status == 429:  # Too Many Requests
+                            response.raise_for_status()
+                            response_data = await response.json()
+                            if response_data is None or len(response_data) == 0:
                                 raise aiohttp.ClientResponseError(
-                                    response.request_info,
-                                    response.history,
-                                    status=429,
+                                    request_info=None,
+                                    history=None,
+                                    status=200,
+                                    message="Empty or None response",
+                                    headers=None,
                                 )
-                            response.raise_for_status()  # Raise an exception for non-200 status codes
-                            data = await response.json()
-                            data = flatten_nested_structure(data)
-                            logger.debug(data)
-
-                    return data  # Simply return the data without processing
-
-                except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-                    logger.error(f"Error fetching data {e}")
-
-                    if attempt == max_retries - 1:  # Last attempt
-                        logger.error(f"Last attempt failed")
-                        return [{key: key_value}]
+                            return response_data
+                except (aiohttp.ClientError, aiohttp.ClientResponseError) as e:
+                    if attempt == max_retries - 1:
+                        logging.error(
+                            f"Failed to fetch data after {max_retries} attempts: {str(e)}"
+                        )
+                        raise
                     else:
-                        delay = (2**attempt * base_delay) + (
-                            random.randint(0, 1000) / 1000
+                        delay = min(max_delay, base_delay * (2**attempt))
+                        jitter = random.uniform(0, 0.1 * delay)  # Add up to 10% jitter
+                        total_delay = delay + jitter
+                        logging.warning(
+                            f"Attempt {attempt + 1} failed, retrying in {total_delay:.2f} seconds..."
                         )
-                        logger.warning(
-                            f"Attempt {attempt + 1} failed. Retrying in {delay:.2f} seconds..."
-                        )
-                        await asyncio.sleep(delay)
+                        await asyncio.sleep(total_delay)
 
-            return [{key: key_value}]  # Return a default value if all attempts fail
+        # Parse the URL to extract parameters
+        parsed_url = urllib.parse.urlparse(next(iter(api_url_dict.values())))
+        query_params = urllib.parse.parse_qs(parsed_url.query)
+        url_params = set(query_params.keys())
 
-        async def process_all_rows():
-            tasks = [
-                process_row(
-                    row,
-                    next(iter(api_url_dict.keys())),
-                    row.get(next(iter(api_url_dict.keys()))),
-                )
-                for row in self.to_dicts()
+        # Map DataFrame columns to URL parameters
+        param_mapping = {}
+        for param in url_params:
+            matching_columns = [
+                col for col in self.columns if param.lower() in col.lower()
             ]
-            results = await asyncio.gather(*tasks)
-            return [
-                item
-                for sublist in results
-                for item in (sublist if isinstance(sublist, list) else [sublist])
-            ]
+            if matching_columns:
+                param_mapping[param] = matching_columns[0]
+            else:
+                raise ValueError(f"No matching column found for URL parameter: {param}")
 
-        results = await process_all_rows()
-        logger.debug(len(results))
-        if results is None:
-            raise Exception("None returned!")
+        api_calls = []
+        for row in self.iter_rows(named=True):
+            call_params = {param: row[col] for param, col in param_mapping.items()}
+            if params:
+                call_params.update(params)
+            formatted_url = next(iter(api_url_dict.values())).format(**call_params)
+            api_calls.append(fetch_api_data(formatted_url, call_params))
 
-        logger.debug(results)
-        # flattened_results = flatten_nested_structure(results)
-        # Create a new DataFrame with the flattened API results
+        results = await asyncio.gather(*api_calls)
+
+        logging.error(results)
+
+        # Combine all API results into a single DataFrame
         api_df = pl.DataFrame(results)
-
-        # Get the set of existing column names
-        existing_columns = set(self.columns)
-
-        logger.debug(f"Existing columns: {existing_columns}")
-        logger.debug(f"API DataFrame columns: {api_df.columns}")
-
-        # Keep only new columns and the key columns from api_df
-        columns_to_keep = [
-            col
-            for col in api_df.columns
-            if col not in existing_columns or col in api_url_dict.keys()
-        ]
-        api_df = api_df.select(columns_to_keep)
-
-        logger.debug(f"Columns to keep: {columns_to_keep}")
-        logger.debug(f"API DataFrame columns after selection: {api_df.columns}")
 
         # Identify join keys that exist in both DataFrames
         join_keys = [
-            key
-            for key in api_url_dict.keys()
-            if key in self.columns and key in api_df.columns
+            col
+            for col in param_mapping.values()
+            if col in self.columns and col in api_df.columns
         ]
-
-        logger.debug(f"Join keys: {join_keys}")
 
         if not join_keys:
             logger.warning(
-                "No common join keys found. Query parameters used in the API call should be added as new columns."  # TODO figure this out
+                "No common join keys found. API results will be appended as new columns."
             )
-
-            return MagicTable(api_df)
+            return MagicTable(pl.concat([self, api_df], how="horizontal"))
         else:
             return MagicTable(self.join(api_df, on=join_keys, how="left"))
 
@@ -1291,27 +1282,6 @@ Your response should be in the following JSON format:
             label = "N" + label
         # Replace any non-alphanumeric characters with underscores
         return "".join(c if c.isalnum() else "_" for c in label)
-
-    async def _store_api_metadata(
-        self, api_url: str, sample_data: List[Dict[str, Any]]
-    ):
-        driver = await self._get_driver()
-        async with driver.session() as session:
-            # Check if API metadata already exists
-            result = await session.run(
-                "MATCH (n:APIEndpoint {url: $api_url}) RETURN n", api_url=api_url
-            )
-            if not await result.single():
-                # If not, generate and store it
-                description = self._generate_api_description(api_url, sample_data)
-                await session.run(
-                    """
-                    MERGE (n:APIEndpoint {url: $api_url})
-                    SET n.description = $description
-                    """,
-                    api_url=api_url,
-                    description=description,
-                )
 
     async def _store_cypher_query_as_edge(self, natural_query: str, cypher_query: str):
         relevant_urls = await self._search_relevant_api_urls([natural_query])
