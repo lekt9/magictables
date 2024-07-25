@@ -247,7 +247,7 @@ class HybridSession:
             else:
                 # Use cache-only logic here
                 result = await self._run_from_cache(query, parameters, **kwargs)
-            await self._save_cache()
+            # await self._save_cache()
             return result
         except:
             return await self._run_from_cache(query, parameters, **kwargs)

@@ -1,3 +1,4 @@
+import random
 from string import Formatter
 import urllib.parse
 from magictables.fallback_driver import HybridDriver
@@ -161,9 +162,10 @@ class MagicTable(pl.DataFrame):
                 api_description = existing_description["a.description"]
             else:
                 # Generate API description if it doesn't exist
-                api_description = await self._generate_api_description(
-                    api_url, self.to_dicts()[:50]
-                )
+                # api_description = await self._generate_api_description(
+                #     api_url, self.to_dicts()[:50]
+                # )
+                api_description = self.to_dicts()[:70]
 
             # Generate query_key
             query_key = self._generate_query_key(
@@ -329,10 +331,10 @@ class MagicTable(pl.DataFrame):
     @staticmethod
     def _generate_node_id(label: str, data: Dict[str, Any]) -> str:
         key_fields = ["id", "uuid", "name", "email"]
-        key_data = {k: v for k, v in data.items() if k in key_fields}
+        key_data = {k: str(v) for k, v in data.items() if k in key_fields}
 
         if not key_data:
-            key_data = data
+            key_data = {k: str(v) for k, v in data.items()}
 
         data_str = json.dumps(key_data, sort_keys=True)
         hash_object = hashlib.md5((label + data_str).encode())
@@ -385,129 +387,6 @@ class MagicTable(pl.DataFrame):
         combined_string = f"{natural_query}|{'|'.join(sorted_urls)}"
         # Generate a hash of the combined string
         return hashlib.md5(combined_string.encode()).hexdigest()
-
-    async def _generate_cypher_query(self, natural_query: str) -> str:
-        relevant_urls = await self._search_relevant_api_urls(natural_query)
-        query_key = self._generate_query_key(natural_query, relevant_urls)
-
-        # Check if we have a stored query for this key
-        stored_query = await self._get_stored_cypher_query(query_key)
-        if stored_query:
-            return stored_query
-
-        # Get a sample of the DataFrame (e.g., first 5 rows)
-        sample_data = self.head(5).to_dicts()
-
-        # Format relevant URLs for the prompt
-        url_info = "\n".join(
-            [
-                f"URL: {url}, Description: {desc}, Similarity: {sim:.2f}"
-                for url, desc, sim in relevant_urls[0]  # Use the first list of results
-            ]
-        )
-        column_types = self.dtypes
-        type_info = "\n".join(
-            [f"{self.columns[i]}: {dtype}" for i, dtype in enumerate(column_types)]
-        )
-
-        prompt = f"""Generate a Cypher query based on the natural language query, considering the provided columns, sample data, relevant API URLs, and column data types.
-
-        Relevant API URLs:
-        {url_info}
-
-        Sample Data:
-        {json.dumps(sample_data, indent=2)}
-
-        Column Data Types:
-        {type_info}
-
-        When joining or comparing columns, use appropriate type conversion functions if needed. For example:
-        - For dates, use: apoc.date.parse(column, 'ms', 'yyyy-MM-dd') for consistent comparison
-        - For numbers, use: toFloat(column) for consistent numeric comparison
-        - For strings, use: toLower(trim(column)) for case-insensitive, trimmed comparison
-
-        Examples:
-        1. Natural Query: "Find all users older than 30"
-        {{"cypher_query": "MATCH (n:User) WHERE toInteger(n.age) > 30 RETURN n"}}
-
-        2. Natural Query: "Get all products with price less than 100"
-        {{"cypher_query": "MATCH (p:Product) WHERE toFloat(p.price) < 100 RETURN p"}}
-
-        3. Natural Query: "List all orders made in the last month"
-        {{"cypher_query": "MATCH (o:Order) WHERE apoc.date.parse(o.date, 'ms', 'yyyy-MM-dd') >= apoc.date.parse(date() - duration('P1M'), 'ms', 'yyyy-MM-dd') RETURN o"}}
-
-        Natural Query: "{natural_query}"
-
-        Please provide a Cypher query for the given natural language query, considering the relevant API URLs, sample data, and column data types.
-        Your response should be in the following JSON format:
-        {{"cypher_query": "Your Cypher query here"}}
-        """
-        response = await call_ai_model(sample_data, prompt)
-        cypher_query = response.get("cypher_query")
-        if cypher_query:
-            await self._store_cypher_query(query_key, cypher_query)
-        return cypher_query  # type: ignore
-
-    async def join_with_query(self, natural_query: str) -> "MagicTable":
-        cypher_query = await self._generate_cypher_query(natural_query)
-        result_df = await self._execute_cypher(cypher_query)
-        await self._store_cypher_query_as_edge(natural_query, cypher_query)
-
-        # Try to use the key column first
-        key_column = self._identify_key_column(
-            self.api_urls[-1]
-        )  # Assuming the last API URL is relevant
-
-        if key_column and key_column in result_df.columns:
-            join_columns = [key_column]
-        else:
-            # Fallback to AI-assisted column identification
-            join_columns = await self._identify_join_columns(MagicTable(result_df))
-
-        if not join_columns:
-            raise ValueError("No suitable columns found for joining the DataFrames")
-
-        # Perform the join operation
-        joined_df = self.join(result_df, on=join_columns, how="left")
-
-        return MagicTable(joined_df)
-
-    async def _identify_join_columns(self, result_df: "MagicTable") -> List[str]:
-        # Get a sample of both DataFrames
-        self_sample = self.head(5).to_dicts()
-        result_sample = result_df.head(5).to_dicts()
-
-        # Prepare column information
-        self_columns = {
-            col: str(dtype) for col, dtype in zip(self.columns, self.dtypes)
-        }
-        result_columns = {
-            col: str(dtype) for col, dtype in zip(result_df.columns, result_df.dtypes)
-        }
-
-        prompt = f"""Given two DataFrames, identify the best columns to use for joining them.
-
-        DataFrame 1 Columns and Types:
-        {json.dumps(self_columns, indent=2)}
-
-        DataFrame 1 Sample Data:
-        {json.dumps(self_sample, indent=2)}
-
-        DataFrame 2 Columns and Types:
-        {json.dumps(result_columns, indent=2)}
-
-        DataFrame 2 Sample Data:
-        {json.dumps(result_sample, indent=2)}
-
-        Please provide a list of column names that are best suited for joining these DataFrames.
-        Consider semantic similarity, data types, and potential primary key relationships.
-        Your response should be in the following JSON format:
-        {{"join_columns": ["column1", "column2"]}}
-        """
-        response = await call_ai_model(self_sample + result_sample, prompt)
-        join_columns = json.loads(response.get("join_columns", "[]"))
-
-        return join_columns
 
     async def _execute_cypher(
         self, query: Union[str, Query], params: Dict[str, Any] = {}
@@ -792,38 +671,6 @@ class MagicTable(pl.DataFrame):
             return (str(stored_queries[0]), str(stored_queries[1]))
         return None
 
-    async def chain(self, other: Union["MagicTable", str]) -> "MagicTable":
-        if isinstance(other, str):
-            other_api_url_template = other
-        elif isinstance(other, MagicTable) and other.api_urls:
-            other_api_url_template = other.api_urls[-1]
-        else:
-            raise ValueError(
-                "Invalid input for chaining. Expected MagicTable with API URL or API URL template string."
-            )
-
-        # Prepare API calls for each row
-        async def call_api_for_row(row):
-            formatted_url = self._format_url_template(other_api_url_template, row)
-            return await self.from_api(formatted_url)
-
-        # Make API calls concurrently
-        api_results = await asyncio.gather(
-            *[call_api_for_row(row) for row in self.iter_rows(named=True)]
-        )
-
-        # Combine results
-        combined_results = []
-        for i, row in enumerate(self.iter_rows(named=True)):
-            combined_row = {**row, **api_results[i].to_dict(as_series=False)}
-            combined_results.append(combined_row)
-
-        # Create a new MagicTable with combined results
-        result_df = MagicTable(pl.DataFrame(combined_results))
-        result_df.api_urls = self.api_urls + [other_api_url_template]
-
-        return result_df
-
     def _identify_template_params(self, url_template: str) -> List[str]:
         """
         Identify the parameters in the URL template.
@@ -945,6 +792,165 @@ class MagicTable(pl.DataFrame):
         else:
             raise ValueError("Generated code did not produce a valid DataFrame")
 
+    async def chain(self, other: Union["MagicTable", str]) -> "MagicTable":
+        if isinstance(other, str):
+            other_api_url_template = other
+        elif isinstance(other, MagicTable) and other.api_urls:
+            other_api_url_template = other.api_urls[-1]
+        else:
+            raise ValueError(
+                "Invalid input for chaining. Expected MagicTable with API URL or API URL template string."
+            )
+
+        # Prepare API URLs for each row
+        api_urls = [
+            self._format_url_template(other_api_url_template, row)
+            for row in self.iter_rows(named=True)
+        ]
+
+        # Process all API calls in a single batch
+        all_results = await self._process_api_batch_single_query(api_urls)
+
+        # Create a list to store the expanded original data
+        expanded_original_data = []
+
+        # Create a list to store the new data
+        new_data = []
+
+        # Iterate through the original data and the results
+        for original_row, result in zip(self.iter_rows(named=True), all_results):
+            if isinstance(result, list):
+                # If the result is a list (multiple rows returned)
+                for item in result:
+                    expanded_original_data.append(original_row)
+                    new_data.append(item)
+            else:
+                # If the result is a single item
+                expanded_original_data.append(original_row)
+                new_data.append(result)
+
+        # Create DataFrames from the expanded data
+        expanded_original_df = pl.DataFrame(expanded_original_data)
+        new_df = pl.DataFrame(new_data)
+
+        # Combine results with expanded original data
+        combined_results = pl.concat([expanded_original_df, new_df], how="horizontal")
+
+        # Create a new MagicTable with combined results
+        result_df = MagicTable(combined_results)
+        result_df.api_urls = self.api_urls + [other_api_url_template]
+
+        return result_df
+
+    async def _process_url(self, url: str) -> Dict[str, Any]:
+        max_retries = 5
+        base_delay = 1
+
+        for attempt in range(max_retries):
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url) as response:
+                        if response.status == 429:
+                            raise aiohttp.ClientResponseError(
+                                response.request_info,
+                                response.history,
+                                status=429,
+                            )
+                        response.raise_for_status()
+                        data = await response.json()
+                        data = flatten_nested_structure(data)
+                        logger.debug(f"Fetched data for URL {url}: {data}")
+                    return data
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                logger.error(f"Error fetching data for URL {url}: {e}")
+                if attempt == max_retries - 1:
+                    logger.error(f"Last attempt failed for URL {url}")
+                    return {}
+                else:
+                    delay = (2**attempt * base_delay) + (random.randint(0, 1000) / 1000)
+                    logger.warning(
+                        f"Attempt {attempt + 1} failed for URL {url}. Retrying in {delay:.2f} seconds..."
+                    )
+                    await asyncio.sleep(delay)
+        return {}
+
+    async def _process_api_batch_single_query(
+        self, api_urls: List[str]
+    ) -> List[Dict[str, Any]]:
+        driver = await self._get_driver()
+        async with driver.session() as session:
+            stored_results_query = """
+            UNWIND $urls AS url
+            MATCH (a:APIEndpoint {url: url})-[:SOURCED_FROM]->(d)
+            WITH url, collect(d) AS data_nodes
+            RETURN url, [node IN data_nodes | node {.*}] AS data
+            """
+            # Check for stored results and identify URLs to fetch
+            stored_result = await session.run(stored_results_query, urls=api_urls)
+            stored_data = {}
+            async for record in stored_result:
+                logging.debug(f"Retrieved record: {record}")
+                if record["data"]:
+                    stored_data[record["url"]] = record["data"]
+                else:
+                    logging.warning(f"Empty data retrieved for URL: {record['url']}")
+
+            logging.info(f"Number of stored results: {len(stored_data)}")
+            logging.info(f"Number of API URLs: {len(api_urls)}")
+
+            # If all URLs have stored data, return immediately
+            if len(stored_data) == len(api_urls):
+                return [stored_data[url] for url in api_urls]
+
+            # Identify URLs to fetch
+            urls_to_fetch = [url for url in api_urls if url not in stored_data]
+            logging.debug(f"URLs to fetch: {urls_to_fetch}")
+
+            if urls_to_fetch:
+                # Fetch new results
+                new_results = await asyncio.gather(
+                    *[self._process_url(url) for url in urls_to_fetch]
+                )
+
+                # Prepare the batch data
+                batch_data = [
+                    {"url": url, "data": data if isinstance(data, list) else [data]}
+                    for url, data in zip(urls_to_fetch, new_results)
+                    if data  # Only include non-empty results
+                ]
+
+                if batch_data:
+                    # Store new results
+                    store_query = """
+                    UNWIND $batch AS item
+                    MERGE (a:APIEndpoint {url: item.url})
+                    WITH a, item
+                    UNWIND item.data AS data_item
+                    CREATE (d:Data)
+                    SET d = data_item
+                    MERGE (d)-[:SOURCED_FROM]->(a)
+                    """
+                    await session.run(store_query, batch=batch_data)
+
+                    # Update stored_data with new results
+                    for item in batch_data:
+                        stored_data[item["url"]] = item["data"]
+
+            # Prepare final results in the order of input api_urls
+            all_results = [stored_data.get(url, []) for url in api_urls]
+
+        return all_results
+
+    def _get_label_from_url(self, url: str) -> str:
+        parsed_url = urllib.parse.urlparse(url)
+        path_parts = parsed_url.path.split("/")
+        label = (
+            path_parts[-1].capitalize()
+            if path_parts[-1]
+            else path_parts[-2].capitalize()
+        )
+        return self._sanitize_label(label)
+
     async def _identify_key_columns(self, api_url_template: str) -> List[str]:
         """
         Identify the most suitable key columns for the given API URL template.
@@ -1010,71 +1016,6 @@ class MagicTable(pl.DataFrame):
         # If we have a single match for some placeholders and multiple for others,
         # return the single matches and use the first match for the others
         return [next(iter(cols)) for cols in matches.values()]
-
-    # async def _identify_key_column(self, api_url_template: str) -> str:
-    #     """
-    #     Identify the most suitable key column for the given API URL template.
-
-    #     :param api_url_template: The API URL template to analyze.
-    #     :return: The name of the identified key column.
-    #     """
-    #     # Extract placeholders from the API URL template
-    #     placeholders = [p.strip("{}") for p in api_url_template.split("{") if "}" in p]
-
-    #     # Get column information
-    #     column_info = {
-    #         col: {"dtype": str(dtype), "sample": self[col].head(5).to_list()}
-    #         for col, dtype in zip(self.columns, self.dtypes)
-    #     }
-
-    #     # Find matching columns for each placeholder
-    #     matches = {}
-    #     for placeholder in placeholders:
-    #         for col, info in column_info.items():
-    #             # Check if the column name is similar to the placeholder
-    #             if (
-    #                 placeholder.lower() in col.lower()
-    #                 or col.lower() in placeholder.lower()
-    #             ):
-    #                 matches[placeholder] = matches.get(placeholder, []) + [col]
-
-    #     # If we have a single match for a placeholder, return it
-    #     if len(matches) == 1 and len(next(iter(matches.values()))) == 1:
-    #         return next(iter(matches.values()))[0]
-
-    #     # If we have multiple matches or no matches, use AI to decide
-    #     if not matches or any(len(cols) > 1 for cols in matches.values()):
-    #         prompt = f"""Given the following API URL template and the current DataFrame structure,
-    # identify the most suitable column to use as a key for chaining API calls.
-
-    # API URL Template: {api_url_template}
-
-    # Placeholders: {placeholders}
-
-    # DataFrame Columns and Types:
-    # {json.dumps(column_info, indent=2)}
-
-    # Potential Matches:
-    # {json.dumps(matches, indent=2)}
-
-    # Please provide the name of the column that best matches the placeholder in the API URL template.
-    # Your response should be in the following JSON format:
-    # {{"column_name": "example_column"}}
-    # Replace "example_column" with the actual column name you identify as the best match.
-    # """
-
-    #         response = await call_ai_model([column_info], prompt)
-    #         key_column = response.get("column_name")
-
-    #         if not key_column or key_column not in self.columns:
-    #             raise ValueError(
-    #                 f"Unable to identify a suitable key column for the given API URL template: {api_url_template}"
-    #             )
-
-    #         return key_column
-
-    #     # If we have a single match for each placeholder, return the first one
-    #     return next(iter(matches.values()))[0]
 
     async def _store_in_neo4j(
         self, label: str, api_url: str, description: str, embedding: List[float]

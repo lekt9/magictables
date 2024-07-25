@@ -204,7 +204,7 @@ async def generate_embeddings(
                     input=texts,
                     api_base=api_base,
                     api_key=api_key,
-                    api_type="openai",
+                    # api_type="openai",
                 )
                 return [item["embedding"] for item in response["data"]]
 
