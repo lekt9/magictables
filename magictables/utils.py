@@ -107,7 +107,7 @@ async def call_ai_model(
     if return_json:
         system_content = "You are a JSON generator. Generate JSON based on the given input data and prompt. Wrap it in a ```json code block, and NEVER send anything else"
     else:
-        system_content = "You are an AI assistant. Respond to the given input data and prompt with natural language. Do not use JSON formatting."
+        system_content = "You are an AI assistant. Respond to the given input data and prompt with natural language. Do not use JSON formatting. You will wrap your response in ```python code block" #TODO account for this in the future when you want to handle normal non python strings
 
     messages = [
         {
@@ -127,6 +127,7 @@ async def call_ai_model(
         if return_json:
             if "```json" in response_content:
                 json_str = response_content.replace("```json", "```").split("```")[1]
+
             else:
                 json_str = response_content
 
@@ -140,6 +141,9 @@ async def call_ai_model(
                 )
                 return response_content
         else:
+            if "```python" in response_content:
+                response_content = response_content.replace("```python", "```").split("```")[1]
+
             return response_content.strip()
 
     except aiohttp.ClientError as e:

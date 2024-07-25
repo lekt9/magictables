@@ -1,40 +1,67 @@
-from magictables import MagicTable
 import os
-from dotenv import load_dotenv
 import asyncio
+from magictables import MagicTable
+from dotenv import load_dotenv
 
-from magictables.notsomagictables import NotSoMagicTable
-
+# Load environment variables
 load_dotenv()
 
-API_KEY = os.getenv("TMDB_API_KEY")
+# Get the TMDb API key
+TMDB_API_KEY = os.getenv("TMDB_API_KEY")
 
+# Base URL for TMDb API
+BASE_URL = "https://api.themoviedb.org/3"
 
 async def main():
-    # Create a MagicTable instance
-    mt = MagicTable()
-    # await mt.clear_all_data()
+    # 1. Start with the first page of popular movies
+    initial_url = f"{BASE_URL}/movie/popular?api_key={TMDB_API_KEY}&page=1"
+    popular_movies = await MagicTable.from_api(initial_url)
 
-    # Fetch popular movies
-    # print("\nFetching popular movies...")
-    popular_movies = await NotSoMagicTable.from_api(
-        f"https://api.themoviedb.org/3/movie/popular?api_key={API_KEY}"
+    # 2. Chain requests to get all pages of popular movies
+    all_pages = await popular_movies.gen(
+        f"Get pages 1 to 100",
     )
-    # print(popular_movies)
 
-    # Chain API calls for movie details
-    # print("\nChaining API calls for movie details...")
-    movie_details = await popular_movies.chain(
-        api_url=f"https://api.themoviedb.org/3/movie/{{id}}?api_key={API_KEY}",
+    print("All pages of popular movies:")
+    print(all_pages.head())
+    print(f"Total movies fetched: {len(all_pages)}")
+    # 3. Chain requests to get detailed information for each movie
+    movie_list = await all_pages.chain(
+        f"{BASE_URL}/discover/movie?api_key={TMDB_API_KEY}&sort_by=popularity.desc&page={{page}}"
     )
-    # print(movie_details)
-    # Example of using from_query to combine data from multiple chained calls
-    # print("\nQuerying across chained data...")
-    result = await movie_details.transform(
-        "Find popular movies with a vote average greater than 7.5"
+
+    # 3. Chain requests to get detailed information for each movie
+    movie_details = await movie_list.chain(
+        f"{BASE_URL}/movie/{{id}}?api_key={TMDB_API_KEY}"
     )
-    # print(result)
 
+    print("\nDetailed movie information:")
+    print(movie_details.head())
 
-if __name__ == "__main__":
-    asyncio.run(main())
+    # 4. Chain requests to get credits for each movie
+    movie_credits = await movie_details.chain(
+        f"{BASE_URL}/movie/{{id}}/credits?api_key={TMDB_API_KEY}"
+    )
+
+    print("\nMovie credits:")
+    print(movie_credits.head())
+
+    # 6. Transform the data to create a summary
+    summary = await movie_credits.transform("""
+    Select 
+        id, 
+        title, 
+        release_date, 
+        vote_average as rating, 
+        budget, 
+        revenue, 
+        (revenue - budget) as profit
+    Order by profit Desc
+    Limit 10
+    """)
+
+    print("\nTop 10 movies by profit:")
+    print(summary)
+
+# Run the main function
+asyncio.run(main())
