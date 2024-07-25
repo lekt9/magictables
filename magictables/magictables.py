@@ -6,15 +6,15 @@ import polars as pl
 from typing import Optional, Dict, Any, List, Tuple, Union
 import aiohttp
 import json
-from .graph_interface import GraphInterface
 from .utils import call_ai_model, generate_embeddings, flatten_nested_structure
 from .tablegraph import TableGraph
 
+
 class MagicTable(pl.DataFrame):
-    _graph: GraphInterface = None  # Class variable to hold the graph instance
+    _graph: TableGraph = None
 
     @classmethod
-    def set_graph(cls, graph: GraphInterface):
+    def set_graph(cls, graph: TableGraph):
         cls._graph = graph
 
     @classmethod
@@ -25,14 +25,22 @@ class MagicTable(pl.DataFrame):
         return cls._graph
 
     def __init__(self, *args, **kwargs):
-        self.api_urls = kwargs.pop('api_urls', [])  # Extract api_urls before passing to super()
+        self.api_urls = kwargs.pop(
+            "api_urls", []
+        )  # Extract api_urls before passing to super()
         super().__init__(*args, **kwargs)
-        self.name = kwargs.get('name', f'df_{id(self)}')
         # Ensure a graph is set
         self.get_default_graph()
 
+    @property
+    def name(self):
+        return hash(
+            "_".join(self.columns) if len(self.columns) > 0 else f"df_{id(self)}"
+        )
+
     def _format_url_template(self, template: str, row: Dict[str, Any]) -> str:
-        return template.format(**{k: row.get(k, f'{{{k}}}') for k in row.keys()})
+        return template.format(**{k: row.get(k, f"{{{k}}}") for k in row.keys()})
+
     @classmethod
     async def from_polars(cls, df: pl.DataFrame, label: str) -> "MagicTable":
         magic_df = cls(df, name=label)
@@ -43,28 +51,42 @@ class MagicTable(pl.DataFrame):
         return magic_df
 
     @classmethod
-    async def from_api(cls, api_url: str, params: Optional[Dict[str, Any]] = None) -> "MagicTable":
+    async def from_api(
+        cls, api_url: str, params: Optional[Dict[str, Any]] = None
+    ) -> "MagicTable":
         async with aiohttp.ClientSession() as session:
             async with session.get(api_url, params=params) as response:
                 data = await response.json()
 
         data = flatten_nested_structure(data)
         df = cls(pl.DataFrame(data))  # Remove the name parameter here
-        df.name = api_url  # Set the name attribute after creation
         cls.get_default_graph().add_dataframe(api_url, df, "API")
         return df
 
-    async def chain(self, other: Union["MagicTable", str]) -> "MagicTable":
+    async def chain(
+        self,
+        other: Union["MagicTable", str],
+        query="Identify the common columns based on the data and try to merge them together",
+    ) -> "MagicTable":
         if isinstance(other, str):
             other_api_url_template = other
-        elif isinstance(other, MagicTable) and hasattr(other, 'api_urls'):
+        elif isinstance(other, MagicTable) and hasattr(other, "api_urls"):
             other_api_url_template = other.api_urls[-1]
         else:
-            return await self._graph_based_chain(other)
+            return await self._graph_based_chain(other, query)
+
+        # Check if the chained result already exists in the graph
+        existing_result = await self._graph.get_chained_result(
+            self.name, other_api_url_template
+        )
+        if existing_result is not None:
+            return MagicTable(
+                existing_result, api_urls=self.api_urls + [other_api_url_template]
+            )
 
         print(f"URL template: {other_api_url_template}")
         print(f"Columns in DataFrame: {self.columns}")
-        
+
         # Prepare API URLs for each row
         api_urls = []
         for row in self.iter_rows(named=True):
@@ -97,18 +119,30 @@ class MagicTable(pl.DataFrame):
                 new_data.append(result)
 
         # Create DataFrames from the expanded data with explicit schema
-        schema = {col: pl.Utf8 for col in self.columns}  # Assume all columns are strings
+        schema = {
+            col: pl.Utf8 for col in self.columns
+        }  # Assume all columns are strings
         expanded_original_df = pl.DataFrame(
-            [{k: json.dumps(v) if isinstance(v, (list, dict)) else str(v) for k, v in row.items()}
-            for row in expanded_original_data],
-            schema=schema
+            [
+                {
+                    k: json.dumps(v) if isinstance(v, (list, dict)) else str(v)
+                    for k, v in row.items()
+                }
+                for row in expanded_original_data
+            ],
+            schema=schema,
         )
-        
+
         # Infer schema for new_data with a larger sample size
         new_df = pl.DataFrame(
-            [{k: json.dumps(v) if isinstance(v, (list, dict)) else v for k, v in row.items()}
-            for row in new_data],
-            infer_schema_length=None
+            [
+                {
+                    k: json.dumps(v) if isinstance(v, (list, dict)) else v
+                    for k, v in row.items()
+                }
+                for row in new_data
+            ],
+            infer_schema_length=None,
         )
 
         # Find common columns
@@ -124,11 +158,23 @@ class MagicTable(pl.DataFrame):
         combined_results = combined_results.unique(keep="first")
 
         # Create a new MagicTable with combined results
-        result_df = MagicTable(combined_results, api_urls=self.api_urls + [other_api_url_template])
+        result_df = MagicTable(
+            combined_results, api_urls=self.api_urls + [other_api_url_template]
+        )
+
+        # Store the chained result in the graph
+        await self._graph.store_chained_result(
+            self.name, other_api_url_template, result_df
+        )
+
         return result_df
 
-    async def _graph_based_chain(self, target_df: "MagicTable", query: str) -> "MagicTable":
-        source_df, target_df = await self._graph.apply_chaining(self.name, target_df.name, query)
+    async def _graph_based_chain(
+        self, target_df: "MagicTable", query: str
+    ) -> "MagicTable":
+        source_df, target_df = await self._graph.apply_chaining(
+            self.name, target_df.name, query
+        )
         return MagicTable(source_df, name=f"{self.name}_chained")
 
     async def _process_api_batch(self, api_urls: List[str]) -> List[Dict[str, Any]]:
@@ -142,7 +188,9 @@ class MagicTable(pl.DataFrame):
 
         tasks = [fetch_url(url) for url in api_urls]
         results = await asyncio.gather(*tasks)
-        return [flatten_nested_structure(result) if result else {} for result in results]
+        return [
+            flatten_nested_structure(result) if result else {} for result in results
+        ]
 
     def get_transformation_suggestions(self, column: str) -> List[str]:
         transformations = self._graph.get_transformations(self.name)
@@ -156,7 +204,9 @@ class MagicTable(pl.DataFrame):
     async def find_similar_dataframes(self, top_k: int = 5) -> List[Tuple[str, float]]:
         return await self._graph.find_similar_dataframes(self.name, top_k)
 
-    async def execute_cypher(self, query: str, params: Dict[str, Any] = {}) -> "MagicTable":
+    async def execute_cypher(
+        self, query: str, params: Dict[str, Any] = {}
+    ) -> "MagicTable":
         result = await self._graph.execute_cypher(query, params)
         return MagicTable(result)
 
@@ -223,6 +273,7 @@ class MagicTable(pl.DataFrame):
             return cls(pl.from_pandas(local_vars["df"]))
         else:
             raise ValueError("Generated code did not produce a valid DataFrame")
+
     def _parse_json_fields(self) -> "MagicTable":
         for column in self.columns:
             if self[column].dtype == pl.Utf8:
@@ -261,7 +312,7 @@ class MagicTable(pl.DataFrame):
             else:
                 standardized_data[key] = str(value)
         return standardized_data
-    
+
     async def transform(self, query: str) -> "MagicTable":
         # First, get transformation suggestions for all columns
         all_suggestions = []
@@ -323,9 +374,9 @@ class MagicTable(pl.DataFrame):
 
         Your response should be the Python code directly, without any JSON formatting.
         """
-        
+
         code = await call_ai_model([], prompt, return_json=False)
-        
+
         if not code:
             raise ValueError("Failed to generate transformation code")
 
@@ -339,10 +390,10 @@ class MagicTable(pl.DataFrame):
         if "result" in local_vars and isinstance(local_vars["result"], pd.DataFrame):
             # Convert the result back to a MagicTable
             result = MagicTable(pl.from_pandas(local_vars["result"]))
-            
+
             # Update the graph with the new transformation
-            self._graph.add_transformation(self.name, query, code)
-            
+            await self._graph.add_transformation(self.name, query, code)
+
             return result
         else:
             raise ValueError("Generated code did not produce a valid DataFrame")
