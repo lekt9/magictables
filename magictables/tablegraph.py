@@ -235,23 +235,26 @@ class TableGraph:
 
     def get_nodes_batch_with_cache_check(
         self, node_ids: List[str]
-    ) -> List[Optional[Node]]:
+    ) -> List[Tuple[str, Optional[Node]]]:
         nodes = self.get_nodes_batch(node_ids)
         current_time = datetime.now()
         return [
             (
-                node
-                if (
-                    node is not None
-                    and current_time
-                    - datetime.fromisoformat(
-                        node.metadata.get("cache_time", "2000-01-01T00:00:00")
+                node_id,
+                (
+                    node
+                    if (
+                        node is not None
+                        and current_time
+                        - datetime.fromisoformat(
+                            node.metadata.get("cache_time", "2000-01-01T00:00:00")
+                        )
+                        < self.cache_expiry
                     )
-                    < self.cache_expiry
-                )
-                else None
+                    else None
+                ),
             )
-            for node in nodes
+            for node_id, node in zip(node_ids, nodes)
         ]
 
     def query_or_fetch(

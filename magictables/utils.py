@@ -107,7 +107,7 @@ async def call_ai_model(
     if return_json:
         system_content = "You are a JSON generator. Generate JSON based on the given input data and prompt. Wrap it in a ```json code block, and NEVER send anything else"
     else:
-        system_content = "You are an AI assistant. Respond to the given input data and prompt with natural language. Do not use JSON formatting. You will wrap your response in ```python code block" #TODO account for this in the future when you want to handle normal non python strings
+        system_content = "You are an AI assistant. Respond to the given input data and prompt with natural language. Do not use JSON formatting. You will wrap your response in ```python code block"  # TODO account for this in the future when you want to handle normal non python strings
 
     messages = [
         {
@@ -142,7 +142,9 @@ async def call_ai_model(
                 return response_content
         else:
             if "```python" in response_content:
-                response_content = response_content.replace("```python", "```").split("```")[1]
+                response_content = response_content.replace("```python", "```").split(
+                    "```"
+                )[1]
 
             return response_content.strip()
 
@@ -228,3 +230,29 @@ async def generate_embeddings(
                 f"Unexpected error generating embedding with {provider}: {str(e)}"
             )
             raise
+
+
+async def fetch_url(
+    url: str, max_retries: int = 3, base_delay: float = 1.0
+) -> Dict[str, Any]:
+    retries = 0
+    while retries < max_retries:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=30) as response:
+                    response.raise_for_status()
+                    data = await response.json()
+                    flattened_data = flatten_nested_structure(data)
+                    if isinstance(flattened_data, list):
+                        return {
+                            f"item_{i}": item for i, item in enumerate(flattened_data)
+                        }
+                    return flattened_data
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            retries += 1
+            if retries == max_retries:
+                raise Exception(
+                    f"Failed to fetch URL after {max_retries} attempts: {url}"
+                ) from e
+            delay = base_delay * (2 ** (retries - 1))  # Exponential backoff
+            await asyncio.sleep(delay)

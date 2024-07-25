@@ -5,7 +5,12 @@ import polars as pl
 import aiohttp
 import json
 from datetime import timedelta
-from .utils import call_ai_model, generate_embeddings, flatten_nested_structure
+from .utils import (
+    call_ai_model,
+    fetch_url,
+    generate_embeddings,
+    flatten_nested_structure,
+)
 from .tablegraph import TableGraph
 from .prompts import TRANSFORM_PROMPT, GENERATE_DATAFRAME_PROMPT
 
@@ -175,31 +180,29 @@ class MagicTable(pl.DataFrame):
         stored_data = {}
         urls_to_fetch = []
 
-        nodes = graph.get_nodes_batch_with_cache_check(api_urls)
-        for url, node in zip(api_urls, nodes):
+        nodes_with_urls = graph.get_nodes_batch_with_cache_check(api_urls)
+
+        for url, node in nodes_with_urls:
             if node is not None:
-                stored_data[url] = node.row_data
+                stored_data[url] = node.row_data  # This is correct now
             else:
                 urls_to_fetch.append(url)
 
-        async def fetch_url(url: str) -> Dict[str, Any]:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url) as response:
-                    response.raise_for_status()
-                    data = await response.json()
-                    return flatten_nested_structure(data)
+        if urls_to_fetch:
+            new_results = await asyncio.gather(
+                *[fetch_url(url) for url in urls_to_fetch]
+            )
 
-        new_results = await asyncio.gather(*[fetch_url(url) for url in urls_to_fetch])
+            url_data_pairs = []
+            for url, data in zip(urls_to_fetch, new_results):
+                if data:
+                    url_data_pairs.append((url, pd.DataFrame([data])))
+                    stored_data[url] = data
 
-        url_data_pairs = []
-        for url, data in zip(urls_to_fetch, new_results):
-            if data:
-                url_data_pairs.append((url, pd.DataFrame([data])))
-                stored_data[url] = data
+            # Use add_tables_batch to add all new data at once
+            if url_data_pairs:
+                graph.add_tables_batch(url_data_pairs)
 
-        # Use add_tables_batch to add all new data at once
-        if url_data_pairs:
-            graph.add_tables_batch(url_data_pairs)
         return [stored_data.get(url, {}) for url in api_urls]
 
     async def transform(self, query: str) -> "MagicTable":
