@@ -366,11 +366,11 @@ class MagicTable(pl.DataFrame):
         result = df.copy()
         result['price'] = pd.to_numeric(result['price'], errors='coerce')
         result['discounted_price'] = result['price'] * 0.9
-        result = result.groupby('category').agg({
+        result = result.groupby('category').agg({{
             'price': 'mean',
             'discounted_price': 'mean',
             'quantity': 'sum'
-        }).reset_index()
+        }}).reset_index()
 
         Your response should be the Python code directly, without any JSON formatting.
         """

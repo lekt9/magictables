@@ -382,10 +382,12 @@ Your response should be the Python code directly, without any JSON formatting.
 
     def update_node(self, node_name: str, **attrs):
         if self.backend == "memory":
+            if node_name not in self.graph.nodes:
+                self.graph.add_node(node_name)
             self.graph.nodes[node_name].update(attrs)
         elif self.backend == "neo4j":
             query = """
-            MATCH (df:Dataframe {name: $name})
+            MERGE (df:Dataframe {name: $name})
             SET df += $attrs
             """
             self.graph.run(query, name=node_name, attrs=attrs)
