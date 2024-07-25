@@ -9,3 +9,4 @@ schemas/
 *.zip
 .DS_Store
 cache/
+logs/

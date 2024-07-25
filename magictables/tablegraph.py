@@ -1,23 +1,62 @@
-from __future__ import annotations
-from typing import TYPE_CHECKING
+# file: magictables/tablegraph.py
 
-if TYPE_CHECKING:
-    from magictables.magictables import MagicTable
+from __future__ import annotations
+from typing import TYPE_CHECKING, Dict, Any, List, Optional, Tuple
 import logging
 import os
 import pickle
-import pandas as pd
 import networkx as nx
-import polars as pl
-from sklearn.metrics.pairwise import cosine_similarity
-from py2neo import Graph as Neo4jGraph, Node, Relationship
-from typing import Dict, Any, List, Optional, Tuple
+from py2neo import (
+    Graph as Neo4jGraph,
+    Node as Neo4jNode,
+    Relationship as Neo4jRelationship,
+)
 from dotenv import load_dotenv
+import pandas as pd
+from uuid import uuid4
+from datetime import datetime, timedelta
 
-from magictables.utils import call_ai_model, generate_embeddings
+if TYPE_CHECKING:
+    from magictables.magictables import MagicTable
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
+
+
+class Node:
+    def __init__(
+        self,
+        node_id: str,
+        table_name: str,
+        row_data: Dict[str, Any],
+        metadata: Dict[str, Any],
+        source: str,
+    ):
+        self.node_id = node_id
+        self.table_name = table_name
+        self.row_data = row_data
+        self.metadata = metadata
+        self.source = source
+
+    def __repr__(self):
+        return f"Node(id={self.node_id}, table={self.table_name}, data={self.row_data}, metadata={self.metadata}, source={self.source})"
+
+
+class Edge:
+    def __init__(
+        self,
+        source_table: str,
+        target_table: str,
+        relationship_type: str,
+        properties: Dict[str, Any],
+    ):
+        self.source_table = source_table
+        self.target_table = target_table
+        self.relationship_type = relationship_type
+        self.properties = properties
+
+    def __repr__(self):
+        return f"Edge(source={self.source_table}, target={self.target_table}, type={self.relationship_type}, props={self.properties})"
 
 
 class TableGraph:
@@ -27,101 +66,285 @@ class TableGraph:
         neo4j_uri=None,
         neo4j_user=None,
         neo4j_password=None,
-        pickle_file="tablegraph.pkl",
+        pickle_file="magictable.pkl",
+        cache_expiry: timedelta = timedelta(hours=1),
     ):
-        load_dotenv()  # Load environment variables from .env file if present
+        load_dotenv()
 
-        if backend is None:
-            # Check for Neo4j environment variables
-            neo4j_uri = os.getenv("NEO4J_URI")
-            neo4j_user = os.getenv("NEO4J_USER")
-            neo4j_password = os.getenv("NEO4J_PASSWORD")
-
-            if neo4j_uri and neo4j_user and neo4j_password:
-                self.backend = "neo4j"
-            else:
-                self.backend = "memory"
-        else:
-            self.backend = backend
+        self.backend = backend or (
+            "neo4j"
+            if all(
+                [
+                    os.getenv("NEO4J_URI"),
+                    os.getenv("NEO4J_USER"),
+                    os.getenv("NEO4J_PASSWORD"),
+                ]
+            )
+            else "memory"
+        )
 
         self.pickle_file = pickle_file
+        self.transformations = {}
+        self.cache_expiry = cache_expiry
 
-        if self.backend == "memory":
-            self.graph = nx.MultiGraph()
-        elif self.backend == "neo4j":
-            if not (neo4j_uri and neo4j_user and neo4j_password):
+        if self.backend == "neo4j":
+            neo4j_uri = neo4j_uri or os.getenv("NEO4J_URI")
+            neo4j_user = neo4j_user or os.getenv("NEO4J_USER")
+            neo4j_password = neo4j_password or os.getenv("NEO4J_PASSWORD")
+
+            if not all([neo4j_uri, neo4j_user, neo4j_password]):
                 raise ValueError(
                     "Neo4j credentials not found in environment variables."
                 )
+
             try:
                 self.graph = Neo4jGraph(neo4j_uri, auth=(neo4j_user, neo4j_password))
             except Exception as e:
-                print(f"Failed to connect to Neo4j: {str(e)}")
-                print("Falling back to memory backend.")
+                logger.error(f"Failed to connect to Neo4j: {str(e)}")
+                logger.info("Falling back to memory backend.")
                 self.backend = "memory"
-                self.graph = nx.MultiGraph()
+                self.graph = nx.MultiDiGraph()
+        elif self.backend == "memory":
+            self.graph = nx.MultiDiGraph()
         else:
             raise ValueError("Unsupported backend. Use 'memory' or 'neo4j'.")
 
-        self.dataframes = {}
-        self.embeddings = {}
+    def add_table(
+        self,
+        table_name: str,
+        df: pd.DataFrame,
+        metadata: Dict[str, Any] = None,
+        source: str = None,
+    ):
+        metadata = metadata or {}
+        metadata["cache_time"] = datetime.now().isoformat()
+        nodes = []
+        relationships = []
 
-    async def add_dataframe(self, name: str, df: "MagicTable", source_name: str):
-        self.dataframes[name] = df
+        for index, row in df.iterrows():
+            node_id = str(uuid4())
+            node = Node(node_id, table_name, row.to_dict(), metadata, source)
+            nodes.append(node)
+            relationships.append((node_id, table_name, "belongs_to", {}))
 
-        df_text = " ".join(df.columns) + " " + " ".join(df.dtypes.astype(str))
-        self.embeddings[name] = (await generate_embeddings([df_text]))[0]
+        self.add_nodes_batch(nodes)
+        self.add_relationships_batch(relationships)
 
-        transformations = await self._generate_potential_transformations(df)
+    def add_tables_batch(self, url_data_pairs: List[Tuple[str, pd.DataFrame]]):
+        if self.backend == "neo4j":
+            # Prepare batch data
+            batch_data = []
+            for url, data in url_data_pairs:
+                for _, row in data.iterrows():
+                    node_id = str(uuid4())
+                    properties = {
+                        **row.to_dict(),
+                        "node_id": node_id,
+                        "table_name": url,
+                        "source": "API",
+                        "cache_time": datetime.now().isoformat(),
+                    }
+                    batch_data.append(properties)
 
-        self.add_node(
-            name,
-            type="dataframe",
-            columns=list(df.columns),
-            source_name=source_name,
-            transformations=transformations,
-        )
+            # Cypher query for batch insertion
+            query = """
+            UNWIND $batch AS row
+            CREATE (n:Row)
+            SET n = row
+            WITH n
+            MATCH (t:Table {name: n.table_name})
+            MERGE (n)-[:BELONGS_TO]->(t)
+            """
 
-    async def apply_chaining(
-        self, source_df_name: str, target_df_name: str, query: str
-    ) -> Tuple["MagicTable", "MagicTable"]:
-        source_df = self.dataframes[source_df_name]
-        target_df = self.dataframes[target_df_name]
+            # Execute the batch query
+            self.graph.run(query, batch=batch_data)
 
-        chaining = self.get_chaining_suggestions(source_df_name, target_df_name)
-        if not chaining:
-            chaining = await self._generate_chaining(source_df, target_df)
+        elif self.backend == "memory":
+            for url, data in url_data_pairs:
+                self.add_table(url, data, {"source": "API"}, "API")
 
-        if query not in chaining:
-            raise ValueError(f"Chaining query '{query}' not found")
+        else:
+            raise ValueError("Unsupported backend. Use 'memory' or 'neo4j'.")
 
-        chain_info = chaining[query]
-        exec(chain_info["code"])
+    def add_nodes_batch(self, nodes: List[Node]):
+        if self.backend == "memory":
+            for node in nodes:
+                self.graph.add_node(node.node_id, **node.__dict__)
+        elif self.backend == "neo4j":
+            batch = []
+            for node in nodes:
+                properties = {
+                    **node.row_data,
+                    **node.metadata,
+                    "node_id": node.node_id,
+                    "table_name": node.table_name,
+                    "source": node.source,
+                }
+                neo4j_node = Neo4jNode("Row", **properties)
+                batch.append(neo4j_node)
+            self.graph.create(*batch)
 
-        self.dataframes[source_df_name] = source_df
-        self.dataframes[target_df_name] = target_df
+    def add_relationships_batch(
+        self, relationships: List[Tuple[str, str, str, Dict[str, Any]]]
+    ):
+        if self.backend == "memory":
+            for source, target, rel_type, properties in relationships:
+                self.graph.add_edge(
+                    source, target, relationship_type=rel_type, **properties
+                )
+        elif self.backend == "neo4j":
+            batch = []
+            for source, target, rel_type, properties in relationships:
+                source_node = self.graph.nodes.match("Row", node_id=source).first()
+                target_node = self.graph.nodes.match("Row", node_id=target).first()
+                if source_node and target_node:
+                    rel = Neo4jRelationship(
+                        source_node, rel_type, target_node, **properties
+                    )
+                    batch.append(rel)
+            self.graph.create(*batch)
 
-        return source_df, target_df
+    def get_nodes_batch(self, node_ids: List[str]) -> List[Optional[Node]]:
+        if self.backend == "memory":
+            return [
+                (
+                    Node(**self.graph.nodes[node_id])
+                    if node_id in self.graph.nodes
+                    else None
+                )
+                for node_id in node_ids
+            ]
+        elif self.backend == "neo4j":
+            query = "MATCH (n:Row) WHERE n.node_id IN $node_ids RETURN n"
+            result = self.graph.run(query, node_ids=node_ids).data()
+            nodes = {
+                node["n"]["node_id"]: Node(
+                    node["n"]["node_id"],
+                    node["n"]["table_name"],
+                    {
+                        k: v
+                        for k, v in node["n"].items()
+                        if k not in ["node_id", "table_name", "source"]
+                    },
+                    {},
+                    node["n"]["source"],
+                )
+                for node in result
+            }
+            return [nodes.get(node_id) for node_id in node_ids]
 
-    def get_transformations(self, df_name: str) -> Dict[str, Any]:
-        node = self.get_node(df_name)
-        if node is None:
-            return {}
-        return node.get("transformations", {})
+    def get_nodes_batch_with_cache_check(
+        self, node_ids: List[str]
+    ) -> List[Optional[Node]]:
+        nodes = self.get_nodes_batch(node_ids)
+        current_time = datetime.now()
+        return [
+            (
+                node
+                if (
+                    node is not None
+                    and current_time
+                    - datetime.fromisoformat(
+                        node.metadata.get("cache_time", "2000-01-01T00:00:00")
+                    )
+                    < self.cache_expiry
+                )
+                else None
+            )
+            for node in nodes
+        ]
 
-    async def find_similar_dataframes(
-        self, df_name: str, top_k: int = 5
-    ) -> List[Tuple[str, float]]:
-        target_embedding = self.embeddings[df_name]
-        similarities = []
+    def query_or_fetch(
+        self, table_name: str, conditions: Union[Dict[str, Any], str] = None
+    ) -> Optional[List[Node]]:
+        if conditions is None:
+            conditions = {}
 
-        for name, embedding in self.embeddings.items():
-            if name != df_name:
-                similarity = cosine_similarity([target_embedding], [embedding])[0][0]
-                similarities.append((name, similarity))
+        if isinstance(conditions, str):
+            # If conditions is a string, treat it as a table name
+            conditions = {"table_name": conditions}
 
-        similarities.sort(key=lambda x: x[1], reverse=True)
-        return similarities[:top_k]
+        query_result = self.query_nodes_batch([conditions])
+        if query_result and query_result[0]:
+            return query_result[0]
+        return None
+
+    def query_nodes_batch(self, conditions: List[Dict[str, Any]]) -> List[List[Node]]:
+        if self.backend == "memory":
+            results = []
+            for condition in conditions:
+                logger.debug(f"Processing condition: {condition}")
+                matching_nodes = []
+                for node_id, data in self.graph.nodes(data=True):
+                    logger.debug(f"Checking node: {node_id}")
+                    logger.debug(f"Node data: {data}")
+                    if all(data["row_data"].get(k) == v for k, v in condition.items()):
+                        logger.debug(f"Node {node_id} matches condition")
+                        try:
+                            node = Node(
+                                node_id=data["node_id"],
+                                table_name=data["table_name"],
+                                row_data=data["row_data"],
+                                metadata=data["metadata"],
+                                source=data["source"],
+                            )
+                            matching_nodes.append(node)
+                        except KeyError as e:
+                            logger.error(f"KeyError when creating Node: {e}")
+                            logger.error(f"Problematic data: {data}")
+                    else:
+                        logger.debug(f"Node {node_id} does not match condition")
+                logger.info(
+                    f"Found {len(matching_nodes)} matching nodes for condition {condition}"
+                )
+                results.append(matching_nodes)
+            return results
+        elif self.backend == "neo4j":
+            results = []
+            for condition in conditions:
+                conditions_str = " AND ".join(
+                    [f"n.`{k}` = ${k}" for k in condition.keys()]
+                )
+                query = f"MATCH (n:Row) WHERE {conditions_str} RETURN n"
+                result = self.graph.run(query, **condition).data()
+                results.append(
+                    [
+                        Node(
+                            node_id=node["n"]["node_id"],
+                            table_name=node["n"]["table_name"],
+                            row_data={
+                                k: v
+                                for k, v in node["n"].items()
+                                if k not in ["node_id", "table_name", "source"]
+                            },
+                            metadata={},
+                            source=node["n"]["source"],
+                        )
+                        for node in result
+                    ]
+                )
+            return results
+
+    def add_transformation(self, table_name: str, query: str, code: str):
+        if table_name not in self.transformations:
+            self.transformations[table_name] = {}
+        self.transformations[table_name][query] = {
+            "code": code,
+            "timestamp": datetime.now().isoformat(),
+        }
+
+    def get_transformation(
+        self, table_name: str, query: str
+    ) -> Optional[Dict[str, str]]:
+        if (
+            table_name in self.transformations
+            and query in self.transformations[table_name]
+        ):
+            transformation = self.transformations[table_name][query]
+            cache_time = datetime.fromisoformat(transformation["timestamp"])
+            if datetime.now() - cache_time < self.cache_expiry:
+                return transformation
+        return None
 
     async def execute_cypher(
         self, query: str, params: Dict[str, Any] = {}
@@ -139,334 +362,26 @@ class TableGraph:
             logger.warning("Cypher queries are only supported with Neo4j backend")
             raise ValueError("Cypher queries are only supported with Neo4j backend")
 
-    def add_node(self, node_name: str, **attrs):
-        if self.backend == "memory":
-            self.graph.add_node(node_name, **attrs)
-        elif self.backend == "neo4j":
-            node = Node("Dataframe", name=node_name, **attrs)
-            self.graph.create(node)
-        self._pickle_state()
-
-    def get_node(self, node_name: str):
-        if self.backend == "memory":
-            return self.graph.nodes.get(node_name)
-        elif self.backend == "neo4j":
-            return self.graph.nodes.match("Dataframe", name=node_name).first()
-
-    def _column_similarity(self, col1: pl.Series, col2: pl.Series) -> float:
-        if col1.dtype == col2.dtype:
-            unique_ratio = min(col1.n_unique(), col2.n_unique()) / max(
-                col1.n_unique(), col2.n_unique()
-            )
-            return 0.5 + 0.5 * unique_ratio
-        return 0
-
-    async def _generate_potential_transformations(
-        self, df: "MagicTable"
-    ) -> Dict[str, Any]:
-        existing_transformations = self.get_transformations(df.name)
-
-        if existing_transformations:
-            # If transformations exist, you might want to check if they're still valid
-            # For example, you could compare the current columns with the stored ones
-            stored_columns = self.get_node(df.name).get("columns", [])
-            if set(df.columns) == set(stored_columns):
-                return existing_transformations
-
-        pandas_df = df.to_pandas()
-        input_data = {
-            "columns": list(pandas_df.columns),
-            "dtypes": [str(dtype) for dtype in pandas_df.dtypes],
-            "sample_data": pandas_df.head(5).to_dict(orient="records"),
-        }
-        prompt = f"""Generate potential transformations for each column in the pandas DataFrame. Include 'to_uppercase' and 'to_lowercase' for string columns, and suggest other relevant transformations based on the data types and sample data.
-
-Current DataFrame structure:
-Columns: {input_data['columns']}
-Data Types: {input_data['dtypes']}
-
-Sample Data:
-{pd.DataFrame(input_data['sample_data']).to_string(index=False)}
-
-Please provide Python code to generate transformations for this DataFrame, adhering to the following guidelines:
-1. Only use pandas (as pd) and no other libraries.
-2. Ensure all operations are efficient and use pandas vectorized operations where possible.
-3. Handle potential data type issues, especially for date/time columns or numeric calculations.
-4. The code should return a dictionary where keys are column names and values are lists of transformation dictionaries.
-5. Each transformation dictionary should have 'name' and 'code' keys.
-6. Do not include any print statements or comments in the code.
-7. The input DataFrame is named 'df'.
-
-Here are some examples of the kind of transformations we're looking for:
-
-transformations = {{
-    'title': [
-        {{'name': 'to_uppercase', 'code': "df['title'] = df['title'].str.upper()"}},
-        {{'name': 'to_lowercase', 'code': "df['title'] = df['title'].str.lower()"}},
-        {{'name': 'capitalize_first', 'code': "df['title'] = df['title'].str.capitalize()"}}
-    ],
-    'release_date': [
-        {{'name': 'to_datetime', 'code': "df['release_date'] = pd.to_datetime(df['release_date'], errors='coerce')"}},
-        {{'name': 'extract_year', 'code': "df['release_year'] = df['release_date'].dt.year"}}
-    ],
-    'vote_average': [
-        {{'name': 'round_to_nearest_half', 'code': "df['vote_average'] = (df['vote_average'] * 2).round() / 2"}},
-        {{'name': 'to_percentage', 'code': "df['vote_percentage'] = df['vote_average'] * 10"}}
-    ],
-    'popularity': [
-        {{'name': 'log_transform', 'code': "df['log_popularity'] = np.log1p(df['popularity'])"}},
-        {{'name': 'normalize', 'code': "df['normalized_popularity'] = (df['popularity'] - df['popularity'].min()) / (df['popularity'].max() - df['popularity'].min())"}}
-    ]
-}}
-
-Your response should be the Python code directly, without any JSON formatting.
-"""
-
-        code = await call_ai_model([], prompt, return_json=False)
-
-        if not code:
-            raise ValueError("Failed to generate transformation code")
-
-        # Execute the generated code
-        local_vars = {"pd": pd, "df": pandas_df}
-        exec(code, globals(), local_vars)
-
-        if "transformations" in local_vars and isinstance(
-            local_vars["transformations"], dict
-        ):
-            transformations = local_vars["transformations"]
-            self.update_node(df.name, transformations=transformations)
-            return transformations
-        else:
-            raise ValueError("Generated code did not produce valid transformations")
-
-    async def _generate_chaining(
-        self, df1: "MagicTable", df2: "MagicTable"
-    ) -> Dict[str, Any]:
-        # First, check if chaining suggestions already exist for these DataFrames
-        existing_suggestions = self.get_chaining_suggestions(df1.name, df2.name)
-
-        if existing_suggestions:
-            # Check if the suggestions are still valid
-            # For example, you could compare the current columns with the stored ones
-            stored_columns_df1 = self.get_node(df1.name).get("columns", [])
-            stored_columns_df2 = self.get_node(df2.name).get("columns", [])
-            if set(df1.columns) == set(stored_columns_df1) and set(df2.columns) == set(
-                stored_columns_df2
-            ):
-                return existing_suggestions
-
-        # If no suggestions exist or they're outdated, generate new ones
-        pandas_df1 = df1.to_pandas()
-        pandas_df2 = df2.to_pandas()
-        input_data = {
-            "df1": {
-                "name": df1.name,
-                "columns": list(pandas_df1.columns),
-                "dtypes": [str(dtype) for dtype in pandas_df1.dtypes],
-                "sample_data": pandas_df1.head(5).to_dict(orient="records"),
-            },
-            "df2": {
-                "name": df2.name,
-                "columns": list(pandas_df2.columns),
-                "dtypes": [str(dtype) for dtype in pandas_df2.dtypes],
-                "sample_data": pandas_df2.head(5).to_dict(orient="records"),
-            },
-        }
-        prompt = f"""Generate a single chaining suggestion between the two pandas DataFrames. Consider column similarities, data types, and potential relationships. Provide a similarity score and chaining code for the suggestion.
-
-        DataFrame 1:
-        Name: {input_data['df1']['name']}
-        Columns: {input_data['df1']['columns']}
-        Data Types: {input_data['df1']['dtypes']}
-
-        DataFrame 2:
-        Name: {input_data['df2']['name']}
-        Columns: {input_data['df2']['columns']}
-        Data Types: {input_data['df2']['dtypes']}
-
-        Sample Data (DataFrame 1):
-        {pd.DataFrame(input_data['df1']['sample_data']).to_string(index=False)}
-
-        Sample Data (DataFrame 2):
-        {pd.DataFrame(input_data['df2']['sample_data']).to_string(index=False)}
-
-        Please provide Python code to generate a single chaining suggestion between these DataFrames, adhering to the following guidelines:
-        1. Only use pandas (as pd) and no other libraries.
-        2. Ensure all operations are efficient and use pandas vectorized operations where possible.
-        3. Handle potential data type issues, especially for date/time columns or numeric calculations.
-        4. The code should return a tuple containing the chaining description (string), similarity score (float), and the chaining code (string).
-        5. Do not include any print statements or comments in the code.
-        6. The input DataFrames are named 'df1' and 'df2'.
-
-        Example of expected output:
-        def generate_chaining_suggestion(df1, df2):
-            # Check if both DataFrames have a 'title' column
-            if 'title' in df1.columns and 'title' in df2.columns:
-                # Calculate similarity score based on matching titles
-                common_titles = set(df1['title']) & set(df2['title'])
-                similarity_score = len(common_titles) / min(len(df1), len(df2))
-                
-                # Generate chaining code
-                chaining_code = "merged_df = pd.merge(df1, df2, on='title', how='inner')"
-                
-                return ("Merge DataFrames on 'title' column", similarity_score, chaining_code)
-            
-            # If no common column found, return a default suggestion
-            return ("No direct chaining possible", 0.0, "# No direct chaining possible")
-
-        chaining_suggestion = generate_chaining_suggestion(df1, df2)
-
-        Your response should be the Python code directly, without any JSON formatting.
-        """
-
-        code = await call_ai_model([], prompt, return_json=False)
-
-        if not code:
-            raise ValueError("Failed to generate chaining code")
-
-        # Execute the generated code
-        local_vars = {"pd": pd, "df1": pandas_df1, "df2": pandas_df2}
-        exec(code, globals(), local_vars)
-
-        if "chaining_suggestion" in local_vars and isinstance(
-            local_vars["chaining_suggestion"], tuple
-        ):
-            suggestion = {
-                local_vars["chaining_suggestion"][0]: {
-                    "similarity_score": local_vars["chaining_suggestion"][1],
-                    "code": local_vars["chaining_suggestion"][2],
-                }
-            }
-
-            # Store the new chaining suggestion in the graph
-            self.update_chaining_suggestions(df1.name, df2.name, suggestion)
-
-            return suggestion
-        else:
-            raise ValueError(
-                "Generated code did not produce a valid chaining suggestion"
-            )
-
-    def get_chaining_suggestions(self, df1_name: str, df2_name: str) -> Dict[str, Any]:
-        if self.backend == "memory":
-            return self.graph.get_edge_data(
-                df1_name, df2_name, key="chaining_suggestions", default={}
-            )
-        elif self.backend == "neo4j":
-            query = """
-            MATCH (df1:Dataframe {name: $df1_name})-[r:CHAINING_SUGGESTIONS]->(df2:Dataframe {name: $df2_name})
-            RETURN r.suggestions as suggestions
-            """
-            result = self.graph.run(query, df1_name=df1_name, df2_name=df2_name).data()
-            return result[0]["suggestions"] if result else {}
-
-    def update_chaining_suggestions(
-        self, df1_name: str, df2_name: str, suggestions: Dict[str, Any]
-    ):
-        if self.backend == "memory":
-            self.graph.add_edge(
-                df1_name, df2_name, key="chaining_suggestions", suggestions=suggestions
-            )
-        elif self.backend == "neo4j":
-            query = """
-            MERGE (df1:Dataframe {name: $df1_name})
-            MERGE (df2:Dataframe {name: $df2_name})
-            MERGE (df1)-[r:CHAINING_SUGGESTIONS]->(df2)
-            SET r.suggestions = $suggestions
-            """
-            self.graph.run(
-                query, df1_name=df1_name, df2_name=df2_name, suggestions=suggestions
-            )
-        self._pickle_state()
-
-    def update_node(self, node_name: str, **attrs):
-        if self.backend == "memory":
-            if node_name not in self.graph.nodes:
-                self.graph.add_node(node_name)
-            self.graph.nodes[node_name].update(attrs)
-        elif self.backend == "neo4j":
-            query = """
-            MERGE (df:Dataframe {name: $name})
-            SET df += $attrs
-            """
-            self.graph.run(query, name=node_name, attrs=attrs)
-        self._pickle_state()
-
     def _pickle_state(self):
         if self.backend == "memory":
             state = {
                 "graph": self.graph,
-                "dataframes": self.dataframes,
-                "embeddings": self.embeddings,
+                "transformations": self.transformations,
             }
             with open(self.pickle_file, "wb") as f:
                 pickle.dump(state, f)
 
-    async def get_chained_result(
-        self, source_df_name: str, api_url_template: str
-    ) -> Optional["MagicTable"]:
-        from magictables.magictables import MagicTable
+    def _unpickle_state(self):
+        if self.backend == "memory" and os.path.exists(self.pickle_file):
+            with open(self.pickle_file, "rb") as f:
+                state = pickle.load(f)
+                logging.debug(state)
+                self.graph = state["graph"]
+                self.transformations = state["transformations"]
 
-        if self.backend == "memory":
-            key = (source_df_name, api_url_template)
-            if key in self.graph.nodes:
-                node_data = self.graph.nodes[key]
-                if "chained_result" in node_data:
-                    return MagicTable(node_data["chained_result"])
-        elif self.backend == "neo4j":
-            query = """
-            MATCH (source:DataFrame {name: $source_name})
-            -[:CHAINED_TO {api_url_template: $api_url_template}]->
-            (result:ChainedResult)
-            RETURN result.data AS chained_result
-            """
-            result = self.graph.run(
-                query, source_name=source_df_name, api_url_template=api_url_template
-            ).data()
-            if result:
-                chained_result = result[0]["chained_result"]
-                return MagicTable(pickle.loads(chained_result))
-        return None
+    def __enter__(self):
+        self._unpickle_state()
+        return self
 
-    async def store_chained_result(
-        self, source_df_name: str, api_url_template: str, result_df: "MagicTable"
-    ):
-        if self.backend == "memory":
-            key = (source_df_name, api_url_template)
-            self.graph.add_node(key, chained_result=result_df.to_dict(as_series=False))
-            self.graph.add_edge(source_df_name, key, api_url_template=api_url_template)
-        elif self.backend == "neo4j":
-            source_node = Node("DataFrame", name=source_df_name)
-            result_node = Node(
-                "ChainedResult", data=pickle.dumps(result_df.to_dict(as_series=False))
-            )
-            relation = Relationship(
-                source_node,
-                "CHAINED_TO",
-                result_node,
-                api_url_template=api_url_template,
-            )
-
-            tx = self.graph.begin()
-            tx.merge(source_node, "DataFrame", "name")
-            tx.create(result_node)
-            tx.create(relation)
-            tx.commit()
-
-        self._pickle_state()
-
-    async def add_transformation(self, df_name: str, query: str, code: str):
-        transformations = self.get_transformations(df_name)
-
-        # Add the new transformation
-        if df_name not in transformations:
-            transformations[df_name] = {}
-
-        transformations[df_name][query] = {"query": query, "code": code}
-
-        # Update the node with the new transformations
-        self.update_node(df_name, transformations=transformations)
-
-        # Pickle the updated state
+    def __exit__(self, exc_type, exc_val, exc_tb):
         self._pickle_state()

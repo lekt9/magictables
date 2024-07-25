@@ -1,3 +1,5 @@
+import logging
+from logging.handlers import RotatingFileHandler
 import os
 import asyncio
 from magictables import MagicTable
@@ -5,12 +7,39 @@ from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
+# Set up logging
+log_directory = "logs"
+if not os.path.exists(log_directory):
+    os.makedirs(log_directory)
+
+log_file = os.path.join(log_directory, "magictables.log")
+
+# Create a RotatingFileHandler
+file_handler = RotatingFileHandler(log_file, maxBytes=10 * 1024 * 1024, backupCount=5)
+file_handler.setLevel(logging.DEBUG)
+
+# Create a StreamHandler for console output
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+
+# Create a formatter and set it for both handlers
+formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+file_handler.setFormatter(formatter)
+console_handler.setFormatter(formatter)
+
+# Get the root logger and add both handlers
+logger = logging.getLogger()
+logger.setLevel(logging.DEBUG)
+logger.addHandler(file_handler)
+logger.addHandler(console_handler)
+
 
 # Get the TMDb API key
 TMDB_API_KEY = os.getenv("TMDB_API_KEY")
 
 # Base URL for TMDb API
 BASE_URL = "https://api.themoviedb.org/3"
+
 
 async def main():
     # 1. Start with the first page of popular movies
@@ -47,21 +76,15 @@ async def main():
     print(movie_credits.head())
 
     # 6. Transform the data to create a summary
-    summary = await movie_credits.transform("""
-    Select 
-        id, 
-        title, 
-        release_date, 
-        vote_average as rating, 
-        budget, 
-        revenue, 
-        (revenue - budget) as profit
-    Order by profit Desc
-    Limit 10
-    """)
+    summary = await movie_credits.transform(
+        """
+    Provide a nice summary of movies
+    """
+    )
 
     print("\nTop 10 movies by profit:")
     print(summary)
+
 
 # Run the main function
 asyncio.run(main())
