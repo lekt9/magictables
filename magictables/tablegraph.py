@@ -1,7 +1,7 @@
 # file: magictables/tablegraph.py
 
 from __future__ import annotations
-from typing import TYPE_CHECKING, Dict, Any, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, Any, List, Optional, Tuple, Union
 import logging
 import os
 import pickle
@@ -9,7 +9,6 @@ import networkx as nx
 from py2neo import (
     Graph as Neo4jGraph,
     Node as Neo4jNode,
-    Relationship as Neo4jRelationship,
 )
 from dotenv import load_dotenv
 import pandas as pd
@@ -140,20 +139,18 @@ class TableGraph:
         metadata["cache_time"] = datetime.now().isoformat()
 
         if self.backend == "neo4j":
-            # Prepare batch data
-            batch_data = []
-            for url, data, table_name in url_data_pairs:
-                for _, row in data.iterrows():
-                    properties = {
-                        **row.to_dict(),
-                        "node_id": table_name,  # Use table_name (from @name property) as node_id
-                        "table_name": url,
-                        "source": source or "API",
-                        **metadata,
-                    }
-                    batch_data.append(properties)
+            batch_data = [
+                {
+                    **row.to_dict(),
+                    "node_id": table_name,
+                    "table_name": url,
+                    "source": source or "API",
+                    **metadata,
+                }
+                for url, data, table_name in url_data_pairs
+                for _, row in data.iterrows()
+            ]
 
-            # Cypher query for batch insertion
             query = """
             UNWIND $batch AS row
             CREATE (n:Row)
@@ -163,19 +160,23 @@ class TableGraph:
             MERGE (n)-[:BELONGS_TO]->(t)
             """
 
-            # Execute the batch query
             self.graph.run(query, batch=batch_data)
 
         elif self.backend == "memory":
-            for url, df, table_name in url_data_pairs:
-                for _, row in df.iterrows():
-                    self.graph.add_node(
-                        table_name,  # Use table_name (from @name property) as node_id
-                        table_name=url,
-                        row_data=row.to_dict(),
-                        metadata=metadata,
-                        source=source or "API",
-                    )
+            nodes_to_add = [
+                (
+                    table_name,
+                    {
+                        "table_name": url,
+                        "row_data": row.to_dict(),
+                        "metadata": metadata,
+                        "source": source or "API",
+                    },
+                )
+                for url, df, table_name in url_data_pairs
+                for _, row in df.iterrows()
+            ]
+            self.graph.add_nodes_from(nodes_to_add)
             self._pickle_state()
 
         else:
@@ -183,43 +184,53 @@ class TableGraph:
 
     def add_nodes_batch(self, nodes: List[Node]):
         if self.backend == "memory":
-            for node in nodes:
-                self.graph.add_node(node.node_id, **node.__dict__)
+            nodes_to_add = [(node.node_id, node.__dict__) for node in nodes]
+            self.graph.add_nodes_from(nodes_to_add)
             self._pickle_state()
         elif self.backend == "neo4j":
-            batch = []
-            for node in nodes:
-                properties = {
-                    **node.row_data,
-                    **node.metadata,
-                    "node_id": node.node_id,  # node.node_id should now be the @name property
-                    "table_name": node.table_name,
-                    "source": node.source,
-                }
-                neo4j_node = Neo4jNode("Row", **properties)
-                batch.append(neo4j_node)
+            batch = [
+                Neo4jNode(
+                    "Row",
+                    **{
+                        **node.row_data,
+                        **node.metadata,
+                        "node_id": node.node_id,
+                        "table_name": node.table_name,
+                        "source": node.source,
+                    },
+                )
+                for node in nodes
+            ]
             self.graph.create(*batch)
 
     def add_relationships_batch(
         self, relationships: List[Tuple[str, str, str, Dict[str, Any]]]
     ):
         if self.backend == "memory":
-            for source, target, rel_type, properties in relationships:
-                self.graph.add_edge(
-                    source, target, relationship_type=rel_type, **properties
-                )
-                self._pickle_state()
+            edges_to_add = [
+                (source, target, {"relationship_type": rel_type, **properties})
+                for source, target, rel_type, properties in relationships
+            ]
+            self.graph.add_edges_from(edges_to_add)
+            self._pickle_state()
         elif self.backend == "neo4j":
-            batch = []
-            for source, target, rel_type, properties in relationships:
-                source_node = self.graph.nodes.match("Row", node_id=source).first()
-                target_node = self.graph.nodes.match("Row", node_id=target).first()
-                if source_node and target_node:
-                    rel = Neo4jRelationship(
-                        source_node, rel_type, target_node, **properties
-                    )
-                    batch.append(rel)
-            self.graph.create(*batch)
+            batch_query = """
+            UNWIND $batch AS rel
+            MATCH (source:Row {node_id: rel.source})
+            MATCH (target:Row {node_id: rel.target})
+            CREATE (source)-[r:RELATED_TO {type: rel.type}]->(target)
+            SET r += rel.properties
+            """
+            batch_data = [
+                {
+                    "source": source,
+                    "target": target,
+                    "type": rel_type,
+                    "properties": properties,
+                }
+                for source, target, rel_type, properties in relationships
+            ]
+            self.graph.run(batch_query, batch=batch_data)
 
     def get_nodes_batch(self, node_ids: List[str]) -> List[Optional[Node]]:
         if self.backend == "memory":
@@ -236,15 +247,15 @@ class TableGraph:
             result = self.graph.run(query, node_ids=node_ids).data()
             nodes = {
                 node["n"]["node_id"]: Node(
-                    node["n"]["node_id"],
-                    node["n"]["table_name"],
-                    {
+                    node_id=node["n"]["node_id"],
+                    table_name=node["n"]["table_name"],
+                    row_data={
                         k: v
                         for k, v in node["n"].items()
                         if k not in ["node_id", "table_name", "source"]
                     },
-                    {},
-                    node["n"]["source"],
+                    metadata={},
+                    source=node["n"]["source"],
                 )
                 for node in result
             }
@@ -293,56 +304,44 @@ class TableGraph:
         if self.backend == "memory":
             results = []
             for condition in conditions:
-                logger.debug(f"Processing condition: {condition}")
-                matching_nodes = []
-                for node_id, data in self.graph.nodes(data=True):
-                    logger.debug(f"Checking node: {node_id}")
-                    logger.debug(f"Node data: {data}")
-                    if all(data["row_data"].get(k) == v for k, v in condition.items()):
-                        logger.debug(f"Node {node_id} matches condition")
-                        try:
-                            node = Node(
-                                node_id=data["node_id"],
-                                table_name=data["table_name"],
-                                row_data=data["row_data"],
-                                metadata=data["metadata"],
-                                source=data["source"],
-                            )
-                            matching_nodes.append(node)
-                        except KeyError as e:
-                            logger.error(f"KeyError when creating Node: {e}")
-                            logger.error(f"Problematic data: {data}")
-                    else:
-                        logger.debug(f"Node {node_id} does not match condition")
-                logger.info(
-                    f"Found {len(matching_nodes)} matching nodes for condition {condition}"
-                )
+                matching_nodes = [
+                    Node(
+                        node_id=node_id,
+                        table_name=data["table_name"],
+                        row_data=data["row_data"],
+                        metadata=data["metadata"],
+                        source=data["source"],
+                    )
+                    for node_id, data in self.graph.nodes(data=True)
+                    if all(data["row_data"].get(k) == v for k, v in condition.items())
+                ]
                 results.append(matching_nodes)
             return results
         elif self.backend == "neo4j":
             results = []
-            for condition in conditions:
-                conditions_str = " AND ".join(
-                    [f"n.`{k}` = ${k}" for k in condition.keys()]
-                )
-                query = f"MATCH (n:Row) WHERE {conditions_str} RETURN n"
-                result = self.graph.run(query, **condition).data()
-                results.append(
-                    [
-                        Node(
-                            node_id=node["n"]["node_id"],
-                            table_name=node["n"]["table_name"],
-                            row_data={
-                                k: v
-                                for k, v in node["n"].items()
-                                if k not in ["node_id", "table_name", "source"]
-                            },
-                            metadata={},
-                            source=node["n"]["source"],
-                        )
-                        for node in result
-                    ]
-                )
+            batch_query = """
+            UNWIND $conditions AS condition
+            MATCH (n:Row)
+            WHERE all(key IN keys(condition) WHERE n[key] = condition[key])
+            RETURN collect(n) AS nodes
+            """
+            batch_result = self.graph.run(batch_query, conditions=conditions).data()
+            for result in batch_result:
+                nodes = [
+                    Node(
+                        node_id=node["node_id"],
+                        table_name=node["table_name"],
+                        row_data={
+                            k: v
+                            for k, v in node.items()
+                            if k not in ["node_id", "table_name", "source"]
+                        },
+                        metadata={},
+                        source=node["source"],
+                    )
+                    for node in result["nodes"]
+                ]
+                results.append(nodes)
             return results
 
     def add_transformation(self, table_name: str, query: str, code: str):
