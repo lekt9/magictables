@@ -5,9 +5,18 @@ import logging
 from typing import Any, Dict, List, Union
 
 import aiohttp
+import pandas as pd
 
-from magictables.utils import flatten_nested_structure
-from .sources import BaseSource, PDFSource, RawSource, APISource, WebSource
+from magictables.prompts import TRANSFORM_PROMPT
+from magictables.utils import call_ai_model, flatten_nested_structure
+from .sources import (
+    BaseSource,
+    GenerativeSource,
+    PDFSource,
+    RawSource,
+    APISource,
+    WebSource,
+)
 import polars as pl
 from .magictablechain import MagicTableChain
 from .tablegraph import TableGraph
@@ -72,6 +81,9 @@ class MagicTable(pl.DataFrame):
     def _format_url_template(template: str, row: Dict[str, Any]) -> str:
         return template.format(**{k: row.get(k, f"{{{k}}}") for k in row.keys()})
 
+    def summary(self):
+        return f"DataFrame: {len(self.to_pandas())} rows x {len(self.to_pandas().columns)} columns. Columns: {', '.join(self.to_pandas().columns)}. Types: {dict(self.to_pandas().dtypes)}. First row: {dict(zip(self.columns,self.row(0)))}"
+
     async def chain(
         self,
         other: Union["MagicTable", str],
@@ -135,8 +147,16 @@ class MagicTable(pl.DataFrame):
             new_sources,
         )
 
+        # Identify duplicate columns
+        duplicate_columns = set(expanded_original_df.columns) & set(new_df.columns)
+
+        # Remove duplicate columns from new_df
+        new_df_unique = new_df.drop(duplicate_columns)
+
         # Combine results with expanded original data
-        combined_results = pl.concat([expanded_original_df, new_df], how="horizontal")
+        combined_results = pl.concat(
+            [expanded_original_df, new_df_unique], how="horizontal"
+        )
 
         # Create a new MagicTable with combined results
         result_df = self._from_existing_data(
@@ -233,3 +253,60 @@ class MagicTable(pl.DataFrame):
                     )
                     await asyncio.sleep(delay)
         return {}
+
+    async def transform(self, query: str) -> "MagicTable":
+        graph = self.get_default_graph()
+        cached_transformation = graph.transformations.get(f"{self.name}_{query}")
+
+        if cached_transformation:
+            code = cached_transformation
+        else:
+            prompt = TRANSFORM_PROMPT.format(
+                data=self.summary(),
+                query=query,
+            )
+            code = await call_ai_model(
+                [], prompt, return_json=False, model="openai/gpt-4o"
+            )
+
+            if not code:
+                raise ValueError("Failed to generate transformation code")
+
+            graph.transformations[f"{self.name}_{query}"] = code
+            graph._pickle_state()  # Save the state after adding a transformation
+
+        df = self.to_pandas()
+        logging.debug(df)
+        local_vars = {"pd": pd, "df": df}
+        logging.debug(code)
+
+        try:
+            exec(code, {"pd": pd, "df": df}, local_vars)
+        except Exception as e:
+            logging.error(f"Error executing transformation code: {str(e)}")
+            raise ValueError(f"Error executing transformation code: {str(e)}")
+
+        if "result" in local_vars and isinstance(local_vars["result"], pd.DataFrame):
+            result_df = pl.from_pandas(local_vars["result"])
+
+            # Create a new GenerativeSource for the transformed data
+            generative_source = GenerativeSource(query, self.name)
+            new_sources = self.sources + [generative_source]
+
+            result = self._from_existing_data(result_df, new_sources)
+
+            # Create a new MagicTableChain for this transformation
+            chain = MagicTableChain(
+                source_table=self.name,
+                api_result_table=f"{self.name}_transform_result",
+                merged_result_table=result.name,
+                chain_type="transform",
+                source_key="",
+                target_key="",
+                metadata={"query": query},
+            )
+            graph.add_chain(chain)
+
+            return result
+        else:
+            raise ValueError("Generated code did not produce a valid DataFrame")

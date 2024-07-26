@@ -145,3 +145,22 @@ class PDFSource(BaseSource):
 
     def get_type(self) -> str:
         return "pdf"
+
+
+class GenerativeSource(BaseSource):
+    def __init__(self, query: str, parent_source_id: str):
+        self.query = query
+        self.parent_source_id = parent_source_id
+
+    async def fetch_data(self) -> List[Dict[str, Any]]:
+        # This method won't be used for fetching, as the data is generated
+        raise NotImplementedError("GenerativeSource does not fetch data")
+
+    def get_identifier(self) -> str:
+        return f"generated_{self.parent_source_id}_{self.query}"
+
+    def get_params(self) -> Optional[Dict[str, Any]]:
+        return {"query": self.query, "parent_source_id": self.parent_source_id}
+
+    def get_type(self) -> str:
+        return "generative"

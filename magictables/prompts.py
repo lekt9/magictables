@@ -16,6 +16,8 @@ Please provide Python code to process this DataFrame, adhering to the following 
 9. For age calculations, use a method that works across different pandas versions, avoiding timedelta conversions to years.
 10. You MUST only use pandas and no other libraries.
 
+IMPORTANT: df is the variable that is your input dataframe.
+
 Your response should be in the following format, here are some EXAMPLES of python code. do NOT use it directly, but rather write code for the dataframe structure provided above:
 ```python
 date_columns = df.select_dtypes(include=['object']).columns[df.select_dtypes(include=['object']).apply(lambda x: pd.to_datetime(x, errors='coerce').notnull().all())]

@@ -124,12 +124,13 @@ class TableGraph:
                 "nodes": [
                     {
                         "name": node,
-                        "df": data["df"],
+                        "df": data.get("df", None),
                         "metadata": data["metadata"],
                         "source_info": data["source_info"],
                         "created_at": data["created_at"].isoformat(),
                     }
                     for node, data in self.graph.nodes(data=True)
+                    if data.get("df", None) is not None
                 ],
                 "edges": [
                     {
