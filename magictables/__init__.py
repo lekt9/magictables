@@ -1,4 +1,4 @@
-from .magictables import MagicTable
-from .notsomagictables import NotSoMagicTable
+from .magictable import MagicTable
+from .notsomagictable import NotSoMagicTable
 
 __all__ = ["MagicTable", "NotSoMagicTable"]
