@@ -1,17 +1,16 @@
 import asyncio
+import logging
 from typing import Optional, Dict, Any, List, Union
 import pandas as pd
 import polars as pl
 import aiohttp
-import json
 from datetime import timedelta
 from .utils import (
     call_ai_model,
-    fetch_url,
     generate_embeddings,
     flatten_nested_structure,
 )
-from .tablegraph import TableGraph
+from .tablegraph import TableGraph, Node
 from .prompts import TRANSFORM_PROMPT, GENERATE_DATAFRAME_PROMPT
 
 
@@ -79,12 +78,10 @@ class MagicTable(pl.DataFrame):
         magic_df = cls(df)
 
         cls.get_default_graph().add_table(
-            label,
-            df.to_pandas(),
-            {
-                "source": "local",
-            },
-            "local",
+            table_name=label,
+            df=df.to_pandas(),
+            metadata={"source": "local"},
+            source="local",
         )
         return magic_df
 
@@ -106,104 +103,12 @@ class MagicTable(pl.DataFrame):
         data = flatten_nested_structure(data)
         df = cls(pl.DataFrame(data))
         graph.add_table(
-            api_url,
-            pd.DataFrame(data),
-            {
-                "source": "API",
-            },
-            "API",
+            table_name=api_url,
+            df=pd.DataFrame(data),
+            metadata={"source": "API"},
+            source="API",
         )
         return df
-
-    async def chain(
-        self, other: Union["MagicTable", str], query: str = ""
-    ) -> "MagicTable":
-        if isinstance(other, str):
-            other_api_url_template = other
-        elif isinstance(other, MagicTable) and hasattr(other, "api_urls"):
-            other_api_url_template = other.api_urls[-1]
-        else:
-            raise ValueError("Unsupported chaining operation")
-
-        api_urls = [
-            self._format_url_template(other_api_url_template, row)
-            for row in self.iter_rows(named=True)
-        ]
-        all_results = await self._process_api_batch(api_urls)
-
-        expanded_original_data = []
-        new_data = []
-        for original_row, result in zip(self.iter_rows(named=True), all_results):
-            if isinstance(result, list):
-                for item in result:
-                    expanded_original_data.append(original_row)
-                    new_data.append(item)
-            else:
-                expanded_original_data.append(original_row)
-                new_data.append(result)
-
-        schema = {col: pl.Utf8 for col in self.columns}
-        expanded_original_df = pl.DataFrame(
-            [
-                {
-                    k: json.dumps(v) if isinstance(v, (list, dict)) else str(v)
-                    for k, v in row.items()
-                }
-                for row in expanded_original_data
-            ],
-            schema=schema,
-        )
-
-        new_df = pl.DataFrame(
-            [
-                {
-                    k: json.dumps(v) if isinstance(v, (list, dict)) else v
-                    for k, v in row.items()
-                }
-                for row in new_data
-            ],
-            infer_schema_length=None,
-        )
-
-        common_columns = set(expanded_original_df.columns) & set(new_df.columns)
-        new_df = new_df.drop(common_columns)
-        combined_results = pl.concat([expanded_original_df, new_df], how="horizontal")
-        combined_results = combined_results.unique(keep="first")
-
-        result_df = MagicTable(
-            combined_results, api_urls=self.api_urls + [other_api_url_template]
-        )
-        return result_df
-
-    async def _process_api_batch(self, api_urls: List[str]) -> List[Dict[str, Any]]:
-        graph = self.get_default_graph()
-        stored_data = {}
-        urls_to_fetch = []
-
-        nodes_with_urls = graph.get_nodes_batch_with_cache_check(api_urls)
-
-        for url, node in nodes_with_urls:
-            if node is not None:
-                stored_data[url] = node.row_data  # This is correct now
-            else:
-                urls_to_fetch.append(url)
-
-        if urls_to_fetch:
-            new_results = await asyncio.gather(
-                *[fetch_url(url) for url in urls_to_fetch]
-            )
-
-            url_data_pairs = []
-            for url, data in zip(urls_to_fetch, new_results):
-                if data:
-                    url_data_pairs.append((url, pd.DataFrame([data])))
-                    stored_data[url] = data
-
-            # Use add_tables_batch to add all new data at once
-            if url_data_pairs:
-                graph.add_tables_batch(url_data_pairs)
-
-        return [stored_data.get(url, {}) for url in api_urls]
 
     async def transform(self, query: str) -> "MagicTable":
         graph = self.get_default_graph()
@@ -238,6 +143,137 @@ class MagicTable(pl.DataFrame):
         else:
             raise ValueError("Generated code did not produce a valid DataFrame")
 
+    async def chain(self, other: Union["MagicTable", str]) -> "MagicTable":
+        if isinstance(other, str):
+            other_api_url_template = other
+        elif isinstance(other, MagicTable) and other.api_urls:
+            other_api_url_template = other.api_urls[-1]
+        else:
+            raise ValueError(
+                "Invalid input for chaining. Expected MagicTable with API URL or API URL template string."
+            )
+
+        # Prepare API URLs for each row
+        api_urls = [
+            self._format_url_template(other_api_url_template, row)
+            for row in self.iter_rows(named=True)
+        ]
+
+        # Process all API calls in a single batch
+        all_results = await self._process_api_batch_single_query(api_urls)
+
+        # Create a list to store the expanded original data
+        expanded_original_data = []
+
+        # Create a list to store the new data
+        new_data = []
+
+        # Iterate through the original data and the results
+        for original_row, result in zip(self.iter_rows(named=True), all_results):
+            if isinstance(result, list):
+                # If the result is a list (multiple rows returned)
+                for item in result:
+                    expanded_original_data.append(original_row)
+                    new_data.append(item)
+            else:
+                # If the result is a single item
+                expanded_original_data.append(original_row)
+                new_data.append(result)
+
+        # Create DataFrames from the expanded data
+        expanded_original_df = pl.DataFrame(expanded_original_data)
+        new_df = pl.DataFrame(new_data)
+
+        # Combine results with expanded original data
+        combined_results = pl.concat([expanded_original_df, new_df], how="horizontal")
+
+        # Create a new MagicTable with combined results
+        result_df = MagicTable(combined_results)
+        result_df.api_urls = self.api_urls + [other_api_url_template]
+
+        return result_df
+
+    async def _process_url(self, url: str) -> Dict[str, Any]:
+        max_retries = 5
+        base_delay = 1
+
+        for attempt in range(max_retries):
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url) as response:
+                        if response.status == 429:
+                            raise aiohttp.ClientResponseError(
+                                response.request_info,
+                                response.history,
+                                status=429,
+                            )
+                        response.raise_for_status()
+                        data = await response.json()
+                        data = flatten_nested_structure(data)
+                        logging.debug(f"Fetched data for URL {url}: {data}")
+                    return data
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                logging.error(f"Error fetching data for URL {url}: {e}")
+                if attempt == max_retries - 1:
+                    logging.error(f"Last attempt failed for URL {url}")
+                    return {}
+                else:
+                    delay = (2**attempt * base_delay) + (random.randint(0, 1000) / 1000)
+                    logging.warning(
+                        f"Attempt {attempt + 1} failed for URL {url}. Retrying in {delay:.2f} seconds..."
+                    )
+                    await asyncio.sleep(delay)
+        return {}
+
+    async def _process_api_batch_single_query(
+        self, api_urls: List[str]
+    ) -> List[Dict[str, Any]]:
+        graph = self.get_default_graph()
+
+        # Check for stored results
+        stored_data = {}
+        for url in api_urls:
+            nodes = graph.query_or_fetch(url)
+            if nodes:
+                stored_data[url] = [node.row_data for node in nodes]
+
+        # If all URLs have stored data, return immediately
+        if len(stored_data) == len(api_urls):
+            return [stored_data[url] for url in api_urls]
+
+        # Identify URLs to fetch
+        urls_to_fetch = [url for url in api_urls if url not in stored_data]
+        logging.debug(f"URLs to fetch: {urls_to_fetch}")
+
+        if urls_to_fetch:
+            # Fetch new results
+            new_results = await asyncio.gather(
+                *[self._process_url(url) for url in urls_to_fetch]
+            )
+
+            # Store new results
+            for url, data in zip(urls_to_fetch, new_results):
+                if data:
+                    if not isinstance(data, list):
+                        data = [data]
+                    nodes = [
+                        Node(
+                            node_id=f"{url}_{i}",
+                            table_name=url,
+                            row_data=item,
+                            metadata={"source": "API"},
+                            source="API",
+                        )
+                        for i, item in enumerate(data)
+                    ]
+                    graph.add_nodes_batch(nodes)
+                    stored_data[url] = data
+
+        # Prepare final results in the order of input api_urls
+        all_results = [stored_data.get(url, []) for url in api_urls]
+
+        return all_results
+
     async def execute_cypher(
         self, query: str, params: Dict[str, Any] = {}
     ) -> "MagicTable":
@@ -265,7 +301,10 @@ class MagicTable(pl.DataFrame):
         if "result" in local_vars and isinstance(local_vars["result"], pd.DataFrame):
             result_df = cls(pl.from_pandas(local_vars["result"]))
             graph.add_table(
-                query, local_vars["result"], {"source": "generated"}, "generated"
+                table_name=query,
+                df=local_vars["result"],
+                metadata={"source": "generated"},
+                source="generated",
             )
             return result_df
         else:

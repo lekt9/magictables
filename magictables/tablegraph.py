@@ -13,7 +13,6 @@ from py2neo import (
 )
 from dotenv import load_dotenv
 import pandas as pd
-from uuid import uuid4
 from datetime import datetime, timedelta
 
 if TYPE_CHECKING:
@@ -78,6 +77,7 @@ class TableGraph:
                     os.getenv("NEO4J_URI"),
                     os.getenv("NEO4J_USER"),
                     os.getenv("NEO4J_PASSWORD"),
+                    os.getenv("LOCAL_GRAPH", "false") == "false",
                 ]
             )
             else "memory"
@@ -116,33 +116,40 @@ class TableGraph:
         metadata: Dict[str, Any] = None,
         source: str = None,
     ):
+        from magictables import MagicTable
+
         metadata = metadata or {}
         metadata["cache_time"] = datetime.now().isoformat()
-        nodes = []
-        relationships = []
 
-        for index, row in df.iterrows():
-            node_id = str(uuid4())
-            node = Node(node_id, table_name, row.to_dict(), metadata, source)
-            nodes.append(node)
-            relationships.append((node_id, table_name, "belongs_to", {}))
+        # Create a MagicTable instance to use its @name property
+        magic_table = MagicTable(df)
 
-        self.add_nodes_batch(nodes)
-        self.add_relationships_batch(relationships)
+        # Create a list with a single tuple containing the table_name and DataFrame
+        url_data_pairs = [(table_name, df, magic_table.name)]
 
-    def add_tables_batch(self, url_data_pairs: List[Tuple[str, pd.DataFrame]]):
+        # Call add_tables_batch with this single-item list
+        self.add_tables_batch(url_data_pairs, metadata=metadata, source=source)
+
+    def add_tables_batch(
+        self,
+        url_data_pairs: List[Tuple[str, pd.DataFrame, str]],
+        metadata: Dict[str, Any] = None,
+        source: str = None,
+    ):
+        metadata = metadata or {}
+        metadata["cache_time"] = datetime.now().isoformat()
+
         if self.backend == "neo4j":
             # Prepare batch data
             batch_data = []
-            for url, data in url_data_pairs:
+            for url, data, table_name in url_data_pairs:
                 for _, row in data.iterrows():
-                    node_id = str(uuid4())
                     properties = {
                         **row.to_dict(),
-                        "node_id": node_id,
+                        "node_id": table_name,  # Use table_name (from @name property) as node_id
                         "table_name": url,
-                        "source": "API",
-                        "cache_time": datetime.now().isoformat(),
+                        "source": source or "API",
+                        **metadata,
                     }
                     batch_data.append(properties)
 
@@ -160,8 +167,16 @@ class TableGraph:
             self.graph.run(query, batch=batch_data)
 
         elif self.backend == "memory":
-            for url, data in url_data_pairs:
-                self.add_table(url, data, {"source": "API"}, "API")
+            for url, df, table_name in url_data_pairs:
+                for _, row in df.iterrows():
+                    self.graph.add_node(
+                        table_name,  # Use table_name (from @name property) as node_id
+                        table_name=url,
+                        row_data=row.to_dict(),
+                        metadata=metadata,
+                        source=source or "API",
+                    )
+            self._pickle_state()
 
         else:
             raise ValueError("Unsupported backend. Use 'memory' or 'neo4j'.")
@@ -170,13 +185,14 @@ class TableGraph:
         if self.backend == "memory":
             for node in nodes:
                 self.graph.add_node(node.node_id, **node.__dict__)
+            self._pickle_state()
         elif self.backend == "neo4j":
             batch = []
             for node in nodes:
                 properties = {
                     **node.row_data,
                     **node.metadata,
-                    "node_id": node.node_id,
+                    "node_id": node.node_id,  # node.node_id should now be the @name property
                     "table_name": node.table_name,
                     "source": node.source,
                 }
@@ -192,6 +208,7 @@ class TableGraph:
                 self.graph.add_edge(
                     source, target, relationship_type=rel_type, **properties
                 )
+                self._pickle_state()
         elif self.backend == "neo4j":
             batch = []
             for source, target, rel_type, properties in relationships:
@@ -335,6 +352,7 @@ class TableGraph:
             "code": code,
             "timestamp": datetime.now().isoformat(),
         }
+        self._pickle_state()
 
     def get_transformation(
         self, table_name: str, query: str

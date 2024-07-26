@@ -112,11 +112,11 @@ def generate_query_params():
             'page': page
         }}
 
-df = pd.DataFrame(generate_query_params())
-
+result = pd.DataFrame(generate_query_params())
+```
 2. Query: "Fetch weather data for New York for the first week of January 2024, using a weather API with pagination. Use this URL template: https://api.example.com/weather?city={{city}}&date={{date}}&page={{page}}"
 Expected output:
-
+```python
 import pandas as pd
 
 def generate_query_params():
@@ -129,8 +129,6 @@ def generate_query_params():
             'page': 1  # Assuming one page per day
         }}
 
-df = pd.DataFrame(generate_query_params())
-
-Your response should be the Python code directly, without any JSON formatting.
+result = pd.DataFrame(generate_query_params())
 ```
 """

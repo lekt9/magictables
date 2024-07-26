@@ -233,7 +233,7 @@ async def generate_embeddings(
 
 
 async def fetch_url(
-    url: str, max_retries: int = 3, base_delay: float = 1.0
+    url: str, max_retries: int = 10, base_delay: float = 2.0
 ) -> Dict[str, Any]:
     retries = 0
     while retries < max_retries:
