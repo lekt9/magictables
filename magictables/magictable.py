@@ -3,7 +3,7 @@ import random
 
 import asyncio
 import logging
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Optional, Union
 
 import aiohttp
 import pandas as pd
@@ -40,9 +40,7 @@ class MagicTable(pl.DataFrame):
         return cls._graph
 
     @classmethod
-    async def from_source(
-        cls, source: Union[RawSource, APISource, WebSource, PDFSource]
-    ) -> "MagicTable":
+    async def from_source(cls, source: BaseSource) -> "MagicTable":
         graph = cls.get_default_graph()
         source_id = source.get_id()
         existing_data = graph.query_or_fetch(source_id)
@@ -54,6 +52,33 @@ class MagicTable(pl.DataFrame):
         data = await source.fetch_data()
         df = pl.DataFrame(data)
         return cls._from_existing_data(df, [source])
+
+    @classmethod
+    async def from_api(
+        cls, api_url: str, params: Optional[Dict[str, Any]] = None
+    ) -> "MagicTable":
+        source = APISource(api_url, params)
+        return await cls.from_source(source)
+
+    @classmethod
+    async def from_web(cls, url: str) -> "MagicTable":
+        source = WebSource(url)
+        return await cls.from_source(source)
+
+    @classmethod
+    async def from_pdf(cls, pdf_url: str) -> "MagicTable":
+        source = PDFSource(pdf_url)
+        return await cls.from_source(source)
+
+    @classmethod
+    async def from_gen(cls, query: str) -> "MagicTable":
+        source = GenerativeSource(query)
+        return await cls.from_source(source)
+
+    @classmethod
+    async def from_raw(cls, data: List[Dict[str, Any]]) -> "MagicTable":
+        source = RawSource(data)
+        return await cls.from_source(source)
 
     @classmethod
     def _from_existing_data(
