@@ -5,7 +5,10 @@ from typing import Dict, Any, List, Optional
 import aiohttp
 import PyPDF2
 import io
-
+import pandas as pd
+import polars as pl
+from magictables.utils import call_ai_model
+from magictables.prompts import GENERATE_DATAFRAME_PROMPT
 from magictables.utils import flatten_nested_structure
 
 
@@ -148,19 +151,40 @@ class PDFSource(BaseSource):
 
 
 class GenerativeSource(BaseSource):
-    def __init__(self, query: str, parent_source_id: str):
+    def __init__(self, query: str):
         self.query = query
-        self.parent_source_id = parent_source_id
 
     async def fetch_data(self) -> List[Dict[str, Any]]:
-        # This method won't be used for fetching, as the data is generated
-        raise NotImplementedError("GenerativeSource does not fetch data")
+        prompt = GENERATE_DATAFRAME_PROMPT.format(query=self.query)
+        response = await call_ai_model([], prompt)
+
+        if isinstance(response, str):
+            code = response
+        elif isinstance(response, dict):
+            code = response.get("code", "")
+        else:
+            raise ValueError("Unexpected response format from AI model")
+
+        if not code:
+            raise ValueError("Failed to generate DataFrame code")
+
+        # Execute the generated code
+        local_vars = {"pd": pd}
+        exec(code, globals(), local_vars)
+
+        if "result" in local_vars and isinstance(local_vars["result"], pd.DataFrame):
+            # Convert pandas DataFrame to polars DataFrame
+            pl_df = pl.from_pandas(local_vars["result"])
+            # Convert polars DataFrame to list of dictionaries
+            return pl_df.to_dicts()
+        else:
+            raise ValueError("Generated code did not produce a valid DataFrame")
 
     def get_identifier(self) -> str:
-        return f"generated_{self.parent_source_id}_{self.query}"
+        return f"generated_{self.query}"
 
     def get_params(self) -> Optional[Dict[str, Any]]:
-        return {"query": self.query, "parent_source_id": self.parent_source_id}
+        return {"query": self.query}
 
     def get_type(self) -> str:
         return "generative"

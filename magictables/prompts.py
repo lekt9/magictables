@@ -153,3 +153,50 @@ Your response should be in the following JSON format:
 {{"column_names": ["example_column1", "example_column2"]}}
 Replace the example column names with the actual column names you identify as the best matches.
 """
+
+
+GENERATE_DATAFRAME_PROMPT = """
+Generate Python code to create a pandas DataFrame using iterators or generators based on the following natural language query:
+
+"{query}"
+
+The code should use pandas to efficiently create the DataFrame.
+Only import and use pandas (as pd). Do not use any other libraries.
+
+If the query mentions or implies the need for pagination or fetching data from an API,
+generate query parameter pairs based on the URL template, focusing on pagination requirements.
+
+Your response should be in the following format, here are some EXAMPLES of python code. do NOT use it directly, but rather write code for the query provided above:
+```python
+1. Query: "Fetch top 100 movies from TMDB API with title, release date, and rating. Use this URL template: https://api.themoviedb.org/3/movie/top_rated?api_key={{api_key}}&page={{page}}"
+Expected output:
+
+import pandas as pd
+
+def generate_query_params():
+    for page in range(1, 6):  # Assuming 20 movies per page, 5 pages for 100 movies
+        yield {{
+            'api_key': 'dummy_api_key',
+            'page': page
+        }}
+
+result = pd.DataFrame(generate_query_params())
+```
+2. Query: "Fetch weather data for New York for the first week of January 2024, using a weather API with pagination. Use this URL template: https://api.example.com/weather?city={{city}}&date={{date}}&page={{page}}"
+Expected output:
+```python
+import pandas as pd
+
+def generate_query_params():
+    city = 'New York'
+    date_range = pd.date_range(start='2024-01-01', end='2024-01-07')
+    for date in date_range:
+        yield {{
+            'city': city,
+            'date': date.strftime('%Y-%m-%d'),
+            'page': 1  # Assuming one page per day
+        }}
+
+result = pd.DataFrame(generate_query_params())
+```
+"""
