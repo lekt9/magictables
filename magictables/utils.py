@@ -33,7 +33,7 @@ os.environ["OR_SITE_URL"] = "https://magictables.ai"  # optional
 os.environ["OR_APP_NAME"] = "MagicTables"  # optional
 
 
-def flatten_nested_structure(nested_structure):
+def flatten_nested_structure(nested_structure, parent_key=""):
     flattened_rows = []
 
     if isinstance(nested_structure, dict):
@@ -47,25 +47,36 @@ def flatten_nested_structure(nested_structure):
 
         if nested_items:
             for key, value in nested_items.items():
+                new_key = f"{parent_key}.{key}" if parent_key else key
                 if isinstance(value, list):
                     for item in value:
                         row = top_level_items.copy()
                         if isinstance(item, dict):
-                            row.update(item)
+                            for sub_key, sub_value in item.items():
+                                if sub_key == key:
+                                    row[f"{new_key}.{sub_key}"] = sub_value
+                                else:
+                                    row[sub_key] = sub_value
                         else:
-                            row[key] = item
+                            row[new_key] = item
                         flattened_rows.append(row)
                 elif isinstance(value, dict):
                     row = top_level_items.copy()
-                    row.update(value)
+                    for sub_key, sub_value in value.items():
+                        if sub_key == key:
+                            row[f"{new_key}.{sub_key}"] = sub_value
+                        else:
+                            row[sub_key] = sub_value
                     flattened_rows.append(row)
         else:
             flattened_rows.append(top_level_items)
     elif isinstance(nested_structure, list):
         for item in nested_structure:
-            flattened_rows.extend(flatten_nested_structure(item))
+            flattened_rows.extend(flatten_nested_structure(item, parent_key))
     else:
-        flattened_rows.append(nested_structure)
+        flattened_rows.append(
+            {parent_key: nested_structure} if parent_key else nested_structure
+        )
 
     return flattened_rows
 

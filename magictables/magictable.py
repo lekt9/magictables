@@ -7,7 +7,8 @@ from typing import Any, Dict, List, Optional, Union
 
 import aiohttp
 import pandas as pd
-
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+import re
 from magictables.prompts import IDENTIFY_KEY_COLUMNS_PROMPT, TRANSFORM_PROMPT
 from magictables.utils import call_ai_model, flatten_nested_structure
 from .sources import (
@@ -105,7 +106,29 @@ class MagicTable(pl.DataFrame):
 
     @staticmethod
     def _format_url_template(template: str, row: Dict[str, Any]) -> str:
-        return template.format(**{k: row.get(k, f"{{{k}}}") for k in row.keys()})
+        # Parse the URL
+        parsed_url = urlparse(template)
+
+        # Parse the query string
+        query_params = parse_qs(parsed_url.query)
+
+        # Replace placeholders in the query parameters
+        for key, value in query_params.items():
+            if len(value) == 1 and value[0].startswith("{") and value[0].endswith("}"):
+                param_name = value[0][1:-1]  # Remove curly braces
+                if param_name in row:
+                    query_params[key] = [str(row[param_name])]
+
+        # Replace placeholders in the path
+        path = re.sub(
+            r"\{([^{}]+)\}",
+            lambda m: str(row.get(m.group(1), m.group(0))),
+            parsed_url.path,
+        )
+
+        # Reconstruct the URL
+        new_query = urlencode(query_params, doseq=True)
+        return urlunparse(parsed_url._replace(path=path, query=new_query))
 
     def summary(self):
         return f"DataFrame: {len(self.to_pandas())} rows x {len(self.to_pandas().columns)} columns. Columns: {', '.join(self.to_pandas().columns)}. Types: {dict(self.to_pandas().dtypes)}. First row: {dict(zip(self.columns,self.row(0)))}"
@@ -174,7 +197,7 @@ class MagicTable(pl.DataFrame):
         other: Union["MagicTable", str],
         source_key: Optional[str] = None,
         target_key: Optional[str] = None,
-        query: Optional[str] = None,
+        query: str = "",
     ) -> "MagicTable":
         graph = self.get_default_graph()
         if isinstance(other, str):
@@ -198,37 +221,37 @@ class MagicTable(pl.DataFrame):
                 return self._from_existing_data(
                     pl.DataFrame(cached_data["df"]), new_sources
                 )
+        placeholders = []
+        for part in other_api_url_template.split("{"):
+            if "}" in part:
+                placeholder = part.split("}")[0]
+                placeholders.append(placeholder)
 
-        if source_key and target_key:
-            key_columns = [source_key]
-            placeholder_to_column = {target_key: source_key}
-        elif query:
-            key_columns = await self._identify_key_columns(
-                other_api_url_template, query=query
-            )
-            placeholders = [
-                p.strip("{}") for p in other_api_url_template.split("{") if "}" in p
-            ]
-            placeholder_to_column = dict(zip(placeholders, key_columns))
-        else:
-            raise ValueError(
-                "Either source_key and target_key or query must be provided."
-            )
-
-        # Prepare API URLs for each row
         api_urls = []
+        key_columns = await self._identify_key_columns(other_api_url_template, query)
+
+        # If source_key and target_key are not provided, use this mapping
+        if not (source_key and target_key):
+            placeholder_to_column = dict(zip(placeholders, key_columns))
+
+        # Modify the URL parameter preparation (around line 239-251)
         for row in self.iter_rows(named=True):
             url_params = {}
-            for placeholder, column in placeholder_to_column.items():
-                if column in row:
-                    url_params[placeholder] = row[column]
+            for placeholder in placeholders:
+                if placeholder in placeholder_to_column:
+                    column = placeholder_to_column[placeholder]
+                    if column in row:
+                        url_params[placeholder] = row[column]
+                    else:
+                        url_params[placeholder] = f"{{{placeholder}}}"
                 else:
                     url_params[placeholder] = f"{{{placeholder}}}"
 
+            logging.debug(f"URL template: {other_api_url_template}")
+            logging.debug(f"URL params: {url_params}")
             api_urls.append(
                 self._format_url_template(other_api_url_template, url_params)
             )
-
         # Process all API calls in a single batch
         all_results = await self._process_api_batch_single_query(api_urls)
 

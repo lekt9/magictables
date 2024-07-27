@@ -156,14 +156,7 @@ class GenerativeSource(BaseSource):
 
     async def fetch_data(self) -> List[Dict[str, Any]]:
         prompt = GENERATE_DATAFRAME_PROMPT.format(query=self.query)
-        response = await call_ai_model([], prompt)
-
-        if isinstance(response, str):
-            code = response
-        elif isinstance(response, dict):
-            code = response.get("code", "")
-        else:
-            raise ValueError("Unexpected response format from AI model")
+        code = await call_ai_model([], prompt, return_json=False)
 
         if not code:
             raise ValueError("Failed to generate DataFrame code")
