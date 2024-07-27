@@ -148,12 +148,19 @@ Placeholders: {placeholders}
 DataFrame Columns and Types:
 {column_info}
 
-Please provide the names of the columns that best match the placeholders in the API URL template.
+Please provide a mapping of placeholders to the most suitable column names from the DataFrame.
+If a placeholder doesn't have a matching column, map it to null.
 Your response should be in the following JSON format:
-{{"column_names": ["example_column1", "example_column2"]}}
-Replace the example column names with the actual column names you identify as the best matches.
+{{
+    "column_mapping": [
+        {{"placeholder": "example_placeholder1", "column": "example_column1"}},
+        {{"placeholder": "example_placeholder2", "column": "example_column2"}},
+        {{"placeholder": "placeholder_without_match", "column": null}}
+    ]
+}}
+Replace the example placeholders and column names with the actual ones you identify as the best matches.
+Ensure that ALL placeholders from the API URL template are accounted for in your response.
 """
-
 
 GENERATE_DATAFRAME_PROMPT = """
 Generate Python code to create a pandas DataFrame using iterators or generators based on the following natural language query:
