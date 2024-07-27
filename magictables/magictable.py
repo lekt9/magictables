@@ -23,6 +23,19 @@ import polars as pl
 from .magictablechain import MagicTableChain
 from .tablegraph import TableGraph
 
+from functools import wraps
+
+
+def wrap_polars_method(method):
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        result = method(self, *args, **kwargs)
+        if isinstance(result, pl.DataFrame):
+            return MagicTable._from_existing_data(result, self.sources)
+        return result
+
+    return wrapper
+
 
 class MagicTable(pl.DataFrame):
     _graph: TableGraph = None
@@ -133,7 +146,7 @@ class MagicTable(pl.DataFrame):
     def summary(self):
         return f"DataFrame: {len(self.to_pandas())} rows x {len(self.to_pandas().columns)} columns. Columns: {', '.join(self.to_pandas().columns)}. Types: {dict(self.to_pandas().dtypes)}. First row: {dict(zip(self.columns,self.row(0)))}"
 
-    async def transform(self, query: str) -> "MagicTable":
+    async def transform(self, query: str, model="gpt-4o-mini") -> "MagicTable":
         graph = self.get_default_graph()
         cached_transformation = graph.transformations.get(f"{self.name}_{query}")
 
@@ -145,7 +158,10 @@ class MagicTable(pl.DataFrame):
                 query=query,
             )
             code = await call_ai_model(
-                [], prompt, return_json=False  # , model="openai/gpt-4o"
+                self.head(30).to_dicts(),
+                prompt,
+                return_json=False,
+                model=model,  # , model="openai/gpt-4o"
             )
 
             if not code:
@@ -168,7 +184,7 @@ class MagicTable(pl.DataFrame):
         if "result" in local_vars and isinstance(local_vars["result"], pd.DataFrame):
             result_df = pl.from_pandas(local_vars["result"])
 
-            self.name = self.name + "query: " + query
+            self.name = self.name + "query: " + query + "model: " + model
 
             # Create a new GenerativeSource for the transformed data
             generative_source = GenerativeSource(self.name)
@@ -444,3 +460,15 @@ class MagicTable(pl.DataFrame):
             )
 
         return key_columns
+
+
+# Add this function after the class definition
+def wrap_magictable_methods():
+    for method_name in dir(pl.DataFrame):
+        method = getattr(pl.DataFrame, method_name)
+        if callable(method) and not method_name.startswith("_"):
+            setattr(MagicTable, method_name, wrap_polars_method(method))
+
+
+# Call the function to wrap the methods
+wrap_magictable_methods()
