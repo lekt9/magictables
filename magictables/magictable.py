@@ -167,7 +167,9 @@ class MagicTable(pl.DataFrame):
         else:
             raise ValueError("Generated code did not produce a valid DataFrame")
 
-    async def chain(self, other: Union["MagicTable", str]) -> "MagicTable":
+    async def chain(
+        self, other: Union["MagicTable", str], query: str = ""
+    ) -> "MagicTable":
         graph = self.get_default_graph()
         if isinstance(other, str):
             other_api_url_template = other
@@ -192,7 +194,9 @@ class MagicTable(pl.DataFrame):
                 )
 
         # Identify key columns for API URL template
-        key_columns = await self._identify_key_columns(other_api_url_template)
+        key_columns = await self._identify_key_columns(
+            other_api_url_template, query=query
+        )
 
         # Prepare API URLs for each row
         api_urls = [
@@ -333,7 +337,9 @@ class MagicTable(pl.DataFrame):
 
         return all_results
 
-    async def _identify_key_columns(self, api_url_template: str) -> List[str]:
+    async def _identify_key_columns(
+        self, api_url_template: str, query: str = ""
+    ) -> List[str]:
         """
         Identify the most suitable key columns for the given API URL template.
 
@@ -350,10 +356,14 @@ class MagicTable(pl.DataFrame):
         }
 
         # Prepare the prompt
-        prompt = IDENTIFY_KEY_COLUMNS_PROMPT.format(
-            api_url_template=api_url_template,
-            placeholders=placeholders,
-            column_info=json.dumps(column_info, indent=2),
+        prompt = (
+            IDENTIFY_KEY_COLUMNS_PROMPT.format(
+                api_url_template=api_url_template,
+                placeholders=placeholders,
+                column_info=json.dumps(column_info, indent=2),
+            )
+            + "Query to achieve: "
+            + query
         )
 
         # Call the AI model to identify key columns
