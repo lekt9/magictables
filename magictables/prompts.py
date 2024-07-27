@@ -15,6 +15,8 @@ Please provide Python code to process this DataFrame, adhering to the following 
 8. When working with dates, always use pd.to_datetime() for conversion and handle potential errors.
 9. For age calculations, use a method that works across different pandas versions, avoiding timedelta conversions to years.
 10. You MUST only use pandas and no other libraries.
+11. Do NOT handle mempty dataframes or missing columns.
+12. Handle strange types like datetime by converting them into something pandas compatible first.
 
 IMPORTANT: df is the variable that is your input dataframe.
 
@@ -133,4 +135,21 @@ def generate_query_params():
 
 result = pd.DataFrame(generate_query_params())
 ```
+"""
+
+
+IDENTIFY_KEY_COLUMNS_PROMPT = """Given the following API URL template and the current DataFrame structure, 
+identify the most suitable columns to use as keys for chaining API calls.
+
+API URL Template: {api_url_template}
+
+Placeholders: {placeholders}
+
+DataFrame Columns and Types:
+{column_info}
+
+Please provide the names of the columns that best match the placeholders in the API URL template.
+Your response should be in the following JSON format:
+{{"column_names": ["example_column1", "example_column2"]}}
+Replace the example column names with the actual column names you identify as the best matches.
 """

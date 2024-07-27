@@ -23,6 +23,7 @@ spycy-aneeshdurg = "^0.0.3"
 py2neo = "^2021.2.4"
 networkx = "^3.3"
 pypdf2 = "^3.0.1"
+dill = "^0.3.8"
 
 [tool.poetry.group.m1mac.dependencies]
 polars-lts-cpu = { version = "^1.2.1", platform = "darwin", markers = "platform_machine == 'arm64'" }

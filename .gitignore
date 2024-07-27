@@ -10,3 +10,4 @@ schemas/
 .DS_Store
 cache/
 logs/
+*.dill

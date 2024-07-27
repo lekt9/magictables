@@ -1,8 +1,7 @@
-# tablegraph.py
+import dill
 
 import networkx as nx
 import polars as pl
-import json
 import os
 from typing import Dict, Any, Optional, List
 from datetime import datetime, timedelta
@@ -14,7 +13,7 @@ class TableGraph:
         self.backend = backend
         self.graph = nx.MultiDiGraph()
         self.transformations = {}
-        self.pickle_file = "table_graph.json"
+        self.pickle_file = "table_graph.dill"
         self.cache_expiry = timedelta(hours=1)
 
     def add_table(
@@ -120,62 +119,14 @@ class TableGraph:
 
     def _pickle_state(self):
         if self.backend == "memory":
-            state = {
-                "nodes": [
-                    {
-                        "name": node,
-                        "df": data.get("df", None),
-                        "metadata": data["metadata"],
-                        "source_info": data["source_info"],
-                        "created_at": data["created_at"].isoformat(),
-                    }
-                    for node, data in self.graph.nodes(data=True)
-                    if data.get("df", None) is not None
-                ],
-                "edges": [
-                    {
-                        "source": source,
-                        "target": target,
-                        "key": key,
-                        "data": {
-                            k: v.isoformat() if isinstance(v, datetime) else v
-                            for k, v in data.items()
-                        },
-                    }
-                    for source, target, key, data in self.graph.edges(
-                        data=True, keys=True
-                    )
-                ],
-                "transformations": self.transformations,
-            }
-            with open(self.pickle_file, "w") as f:
-                json.dump(state, f)
+            with open(self.pickle_file, "wb") as f:
+                dill.dump(self, f)
 
     def _unpickle_state(self):
         if self.backend == "memory" and os.path.exists(self.pickle_file):
-            with open(self.pickle_file, "r") as f:
-                state = json.load(f)
-
-            self.graph = nx.MultiDiGraph()
-            for node in state["nodes"]:
-                self.graph.add_node(
-                    node["name"],
-                    df=node["df"],
-                    metadata=node["metadata"],
-                    source_info=node["source_info"],
-                    created_at=datetime.fromisoformat(node["created_at"]),
-                )
-
-            for edge in state["edges"]:
-                edge_data = edge["data"]
-                edge_data["created_at"] = datetime.fromisoformat(
-                    edge_data["created_at"]
-                )
-                self.graph.add_edge(
-                    edge["source"], edge["target"], key=edge["key"], **edge_data
-                )
-
-            self.transformations = state["transformations"]
+            with open(self.pickle_file, "rb") as f:
+                loaded_graph = dill.load(f)
+                self.__dict__.update(loaded_graph.__dict__)
 
     def __enter__(self):
         self._unpickle_state()
