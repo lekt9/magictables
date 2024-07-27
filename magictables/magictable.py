@@ -145,8 +145,10 @@ class MagicTable(pl.DataFrame):
         if "result" in local_vars and isinstance(local_vars["result"], pd.DataFrame):
             result_df = pl.from_pandas(local_vars["result"])
 
+            self.name = self.name + "query: " + query
+
             # Create a new GenerativeSource for the transformed data
-            generative_source = GenerativeSource(query, self.name)
+            generative_source = GenerativeSource(self.name)
             new_sources = self.sources + [generative_source]
 
             result = self._from_existing_data(result_df, new_sources)
@@ -167,7 +169,13 @@ class MagicTable(pl.DataFrame):
         else:
             raise ValueError("Generated code did not produce a valid DataFrame")
 
-    async def chain(self, other: Union["MagicTable", str]) -> "MagicTable":
+    async def chain(
+        self,
+        other: Union["MagicTable", str],
+        source_key: Optional[str] = None,
+        target_key: Optional[str] = None,
+        query: Optional[str] = None,
+    ) -> "MagicTable":
         graph = self.get_default_graph()
         if isinstance(other, str):
             other_api_url_template = other
@@ -177,7 +185,7 @@ class MagicTable(pl.DataFrame):
             new_sources = self.sources + other.sources
         else:
             raise ValueError(
-                "Invalid input for chaining. Expected MagicTable with API URL or API URL template string."
+                "Invalid input for chaining. Expected MagicTable with sources or API URL template string."
             )
 
         new_id = "_".join([source.get_id() for source in new_sources])
@@ -191,22 +199,41 @@ class MagicTable(pl.DataFrame):
                     pl.DataFrame(cached_data["df"]), new_sources
                 )
 
-        # Identify key columns for API URL template
-        key_columns = await self._identify_key_columns(other_api_url_template)
+        if source_key and target_key:
+            key_columns = [source_key]
+            placeholder_to_column = {target_key: source_key}
+        elif query:
+            key_columns = await self._identify_key_columns(
+                other_api_url_template, query=query
+            )
+            placeholders = [
+                p.strip("{}") for p in other_api_url_template.split("{") if "}" in p
+            ]
+            placeholder_to_column = dict(zip(placeholders, key_columns))
+        else:
+            raise ValueError(
+                "Either source_key and target_key or query must be provided."
+            )
 
         # Prepare API URLs for each row
-        api_urls = [
-            self._format_url_template(other_api_url_template, row)
-            for row in self.select(key_columns).iter_rows(named=True)
-        ]
+        api_urls = []
+        for row in self.iter_rows(named=True):
+            url_params = {}
+            for placeholder, column in placeholder_to_column.items():
+                if column in row:
+                    url_params[placeholder] = row[column]
+                else:
+                    url_params[placeholder] = f"{{{placeholder}}}"
+
+            api_urls.append(
+                self._format_url_template(other_api_url_template, url_params)
+            )
 
         # Process all API calls in a single batch
         all_results = await self._process_api_batch_single_query(api_urls)
 
-        # Create a list to store the expanded original data
+        # Create lists to store the expanded original data and new data
         expanded_original_data = []
-
-        # Create a list to store the new data
         new_data = []
 
         # Iterate through the original data and the results
@@ -333,11 +360,14 @@ class MagicTable(pl.DataFrame):
 
         return all_results
 
-    async def _identify_key_columns(self, api_url_template: str) -> List[str]:
+    async def _identify_key_columns(
+        self, api_url_template: str, query: str = ""
+    ) -> List[str]:
         """
         Identify the most suitable key columns for the given API URL template.
 
         :param api_url_template: The API URL template to analyze.
+        :param query: Additional query information to provide context.
         :return: A list of names of the identified key columns.
         """
         # Extract placeholders from the API URL template
@@ -355,12 +385,31 @@ class MagicTable(pl.DataFrame):
             placeholders=placeholders,
             column_info=json.dumps(column_info, indent=2),
         )
+        if query:
+            prompt += f"\nQuery to achieve: {query}"
 
         # Call the AI model to identify key columns
         response = await call_ai_model([], prompt, return_json=True)
-        key_columns = response.get("column_names", [])
 
-        if not key_columns or any(col not in self.columns for col in key_columns):
+        # Extract the column mapping from the response
+        column_mapping = response.get("column_mapping", [])
+
+        # Create a dictionary of placeholder to column mappings, excluding null values
+        key_columns_dict = {
+            item["placeholder"]: item["column"]
+            for item in column_mapping
+            if item["column"] is not None
+        }
+
+        # Ensure all placeholders are accounted for
+        for placeholder in placeholders:
+            if placeholder not in key_columns_dict:
+                key_columns_dict[placeholder] = placeholder
+
+        # Get the final list of key columns, ensuring they exist in the DataFrame
+        key_columns = [col for col in key_columns_dict.values() if col in self.columns]
+
+        if not key_columns:
             raise ValueError(
                 f"Unable to identify suitable key columns for the given API URL template: {api_url_template}"
             )
