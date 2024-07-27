@@ -47,26 +47,25 @@ def flatten_nested_structure(nested_structure, parent_key=""):
 
         if nested_items:
             for key, value in nested_items.items():
-                new_key = f"{parent_key}.{key}" if parent_key else key
                 if isinstance(value, list):
                     for item in value:
                         row = top_level_items.copy()
                         if isinstance(item, dict):
                             for sub_key, sub_value in item.items():
                                 if sub_key == key:
-                                    row[f"{new_key}.{sub_key}"] = sub_value
+                                    row[key] = sub_value
                                 else:
-                                    row[sub_key] = sub_value
+                                    row[f"{key}.{sub_key}"] = sub_value
                         else:
-                            row[new_key] = item
+                            row[key] = item
                         flattened_rows.append(row)
                 elif isinstance(value, dict):
                     row = top_level_items.copy()
                     for sub_key, sub_value in value.items():
                         if sub_key == key:
-                            row[f"{new_key}.{sub_key}"] = sub_value
+                            row[key] = sub_value
                         else:
-                            row[sub_key] = sub_value
+                            row[f"{key}.{sub_key}"] = sub_value
                     flattened_rows.append(row)
         else:
             flattened_rows.append(top_level_items)

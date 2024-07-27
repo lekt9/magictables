@@ -230,8 +230,14 @@ class MagicTable(pl.DataFrame):
         api_urls = []
         key_columns = await self._identify_key_columns(other_api_url_template, query)
 
-        # If source_key and target_key are not provided, use this mapping
-        if not (source_key and target_key):
+        if source_key and target_key:
+            if source_key in self.columns and target_key in placeholders:
+                placeholder_to_column = {target_key: source_key}
+            else:
+                # If no common column, use query-based key_columns
+                placeholder_to_column = dict(zip(placeholders, key_columns))
+        else:
+            # If source_key and target_key are not provided, use query-based key_columns
             placeholder_to_column = dict(zip(placeholders, key_columns))
 
         # Modify the URL parameter preparation (around line 239-251)
