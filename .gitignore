@@ -6,3 +6,8 @@ dist/
 build/
 magic.db
 schemas/
+*.zip
+.DS_Store
+cache/
+logs/
+*.dill

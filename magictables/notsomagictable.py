@@ -1,7 +1,6 @@
 import pandas as pd
 import polars as pl
-from magictables.magictables import MagicTable
-import asyncio
+from magictables.magictable import MagicTable
 
 
 class NotSoMagicTable(pd.DataFrame):
