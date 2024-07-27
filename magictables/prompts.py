@@ -16,77 +16,12 @@ Please provide Python code to process this DataFrame, adhering to the following 
 9. For age calculations, use a method that works across different pandas versions, avoiding timedelta conversions to years.
 10. You MUST only use pandas and no other libraries.
 11. Do NOT handle mempty dataframes or missing columns.
-12. Handle strange types like datetime by converting them into something pandas compatible first.
-
-IMPORTANT: df is the variable that is your input dataframe.
+12. You can only import pandas as pd, no other libraries.
+IMPORTANT: df is the variable that is your input dataframe. It is defined outside of the code you are writing. Do not recreate the data as it has already been defined.
 
 Your response should be in the following format, here are some EXAMPLES of python code. do NOT use it directly, but rather write code for the dataframe structure provided above:
 ```python
-date_columns = df.select_dtypes(include=['object']).columns[df.select_dtypes(include=['object']).apply(lambda x: pd.to_datetime(x, errors='coerce').notnull().all())]
-for col in date_columns:
-df[col] = pd.to_datetime(df[col], errors='coerce')
-
-# Handle missing values
-df = df.fillna({{
-col: df[col].mean() if pd.api.types.is_numeric_dtype(df[col]) else df[col].mode()[0]
-for col in df.columns
-}})
-
-# Create age column if 'birthdate' exists
-if 'birthdate' in df.columns:
-df['age'] = (pd.Timestamp.now() - df['birthdate']).astype('<m8[Y]').astype(int)
-
-# Perform string operations
-text_columns = df.select_dtypes(include=['object']).columns
-for col in text_columns:
-df[col] = df[col].str.strip().str.lower()
-
-# One-hot encode categorical variables
-categorical_columns = df.select_dtypes(include=['object']).columns
-df = pd.get_dummies(df, columns=categorical_columns, drop_first=True)
-
-# Scale numerical columns
-from sklearn.preprocessing import StandardScaler
-scaler = StandardScaler()
-numeric_columns = df.select_dtypes(include=['int64', 'float64']).columns
-df[numeric_columns] = scaler.fit_transform(df[numeric_columns])
-
-# Perform aggregations
-if 'category' in df.columns and 'value' in df.columns:
-df['total_value'] = df.groupby('category')['value'].transform('sum')
-df['percentage'] = df['value'] / df['total_value'] * 100
-
-# Filter data based on conditions
-if 'age' in df.columns:
-df = df[df['age'] >= 18]
-
-# Sort the dataframe
-if 'date' in df.columns:
-df = df.sort_values('date', ascending=False)
-
-# Rename columns for clarity
-df = df.rename(columns={{
-'col1': 'feature_1',
-'col2': 'feature_2'
-}})
-
-# Create a new calculated column
-if 'price' in df.columns and 'quantity' in df.columns:
-df['total_revenue'] = df['price'] * df['quantity']
-
-# Perform a rolling average if time-series data is present
-if 'date' in df.columns and 'value' in df.columns:
-df = df.sort_values('date')
-df['rolling_avg'] = df['value'].rolling(window=7).mean()
-
-# Drop unnecessary columns
-columns_to_drop = ['temp_col1', 'temp_col2']
-df = df.drop(columns=columns_to_drop, errors='ignore')
-
-# Reset index if needed
-df = df.reset_index(drop=True)
-
-result = df
+df = ...
 ```
 """
 

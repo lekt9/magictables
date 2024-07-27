@@ -6,7 +6,6 @@ import logging
 from typing import Any, Dict, List, Optional, Union
 
 import aiohttp
-import pandas as pd
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 import re
 from magictables.prompts import IDENTIFY_KEY_COLUMNS_PROMPT, TRANSFORM_PROMPT
@@ -161,7 +160,7 @@ class MagicTable(pl.DataFrame):
                 self.head(30).to_dicts(),
                 prompt,
                 return_json=False,
-                model=model,  # , model="openai/gpt-4o"
+                model=model,
             )
 
             if not code:
@@ -170,43 +169,35 @@ class MagicTable(pl.DataFrame):
             graph.transformations[f"{self.name}_{query}"] = code
             graph._pickle_state()  # Save the state after adding a transformation
 
-        df = self.to_pandas()
-        logging.debug(df)
-        local_vars = {"pd": pd, "df": df}
-        logging.debug(code)
+        print("Generated transformation code:")
+        print(code)
 
-        try:
-            exec(code, {"pd": pd, "df": df}, local_vars)
-        except Exception as e:
-            logging.error(f"Error executing transformation code: {str(e)}")
-            raise ValueError(f"Error executing transformation code: {str(e)}")
+        # Execute the generated code
+        local_vars = {"df": self.to_pandas()}
+        exec(code, globals(), local_vars)
+        result_df = local_vars["df"]
 
-        if "result" in local_vars and isinstance(local_vars["result"], pd.DataFrame):
-            result_df = pl.from_pandas(local_vars["result"])
+        self.name = f"{self.name}_query:{query}_model:{model}"
 
-            self.name = self.name + "query: " + query + "model: " + model
+        # Create a new GenerativeSource for the transformed data
+        generative_source = GenerativeSource(self.name)
+        new_sources = self.sources + [generative_source]
 
-            # Create a new GenerativeSource for the transformed data
-            generative_source = GenerativeSource(self.name)
-            new_sources = self.sources + [generative_source]
+        result = self._from_existing_data(pl.from_pandas(result_df), new_sources)
 
-            result = self._from_existing_data(result_df, new_sources)
+        # Create a new MagicTableChain for this transformation
+        chain = MagicTableChain(
+            source_table=self.name,
+            api_result_table=f"{self.name}_transform_result",
+            merged_result_table=result.name,
+            chain_type="transform",
+            source_key="",
+            target_key="",
+            metadata={"query": query},
+        )
+        graph.add_chain(chain)
 
-            # Create a new MagicTableChain for this transformation
-            chain = MagicTableChain(
-                source_table=self.name,
-                api_result_table=f"{self.name}_transform_result",
-                merged_result_table=result.name,
-                chain_type="transform",
-                source_key="",
-                target_key="",
-                metadata={"query": query},
-            )
-            graph.add_chain(chain)
-
-            return result
-        else:
-            raise ValueError("Generated code did not produce a valid DataFrame")
+        return result
 
     async def chain(
         self,
@@ -256,7 +247,6 @@ class MagicTable(pl.DataFrame):
             # If source_key and target_key are not provided, use query-based key_columns
             placeholder_to_column = dict(zip(placeholders, key_columns))
 
-        # Modify the URL parameter preparation (around line 239-251)
         for row in self.iter_rows(named=True):
             url_params = {}
             for placeholder in placeholders:
@@ -277,43 +267,38 @@ class MagicTable(pl.DataFrame):
         # Process all API calls in a single batch
         all_results = await self._process_api_batch_single_query(api_urls)
 
-        # Create lists to store the expanded original data and new data
-        expanded_original_data = []
-        new_data = []
+        logging.debug(len(all_results))
 
-        # Iterate through the original data and the results
-        for original_row, result in zip(self.iter_rows(named=True), all_results):
-            if isinstance(result, list):
-                # If the result is a list (multiple rows returned)
-                for item in result:
-                    expanded_original_data.append(original_row)
-                    new_data.append(item)
-            else:
-                # If the result is a single item
-                expanded_original_data.append(original_row)
-                new_data.append(result)
+        # Create DataFrame from the original data
+        expanded_original_df = pl.DataFrame(self.iter_rows(named=True))
 
-        # Create DataFrames from the expanded data
-        expanded_original_df = pl.DataFrame(expanded_original_data)
-        new_df = pl.DataFrame(new_data)
-
-        # Combine results with expanded original data
-        left_columns = set(expanded_original_df.columns)
-        right_columns = set(new_df.columns)
-
-        # Find the common columns
-        common_columns = left_columns.intersection(right_columns)
-
-        # Remove common columns from the right DataFrame
-        new_df_unique = new_df.drop(common_columns)
-
-        # Concatenate the DataFrames horizontally
-        combined_results = pl.concat(
-            [expanded_original_df, new_df_unique], how="horizontal"
+        # Create a column with the API results
+        expanded_original_df = expanded_original_df.with_columns(
+            [pl.Series("api_results", all_results)]
         )
 
-        # Create a new MagicTable with combined results
-        result_df = self._from_existing_data(combined_results, new_sources)
+        # Explode the api_results column
+        exploded_df = expanded_original_df.explode("api_results")
+
+        # Convert the exploded api_results to struct and then to columns
+        api_result_columns = set()
+        for result in all_results:
+            if isinstance(result, list) and result:
+                api_result_columns.update(result[0].keys())
+            elif isinstance(result, dict):
+                api_result_columns.update(result.keys())
+
+        exploded_df = exploded_df.with_columns(
+            [
+                pl.col("api_results").struct.rename_fields(
+                    [f"api_{col}" for col in api_result_columns]
+                )
+            ]
+        )
+        exploded_df = exploded_df.unnest("api_results")
+
+        # Create a new MagicTable with the exploded results
+        result_df = self._from_existing_data(exploded_df, new_sources)
 
         # Add chain between source and result tables
         chain = MagicTableChain(
